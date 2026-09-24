@@ -14,7 +14,9 @@
     "e2e": "playwright test"
   },
   "dependencies": {
+    "@mapbox/vector-tile": "^3.0.0",
     "maplibre-gl": "^6.11.2",
+    "pbf": "^5.1.2",
     "three": "^0.186.0"
   },
   "devDependencies": {
