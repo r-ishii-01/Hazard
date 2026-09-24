@@ -1,0 +1,27 @@
+{
+  "name": "kugenuma-tsunami-sim",
+  "private": true,
+  "version": "0.1.0",
+  "description": "鵠沼海岸（藤沢市）津波シミュレーション・グラフィックアニメーションサイト",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "maplibre-gl": "^6.11.2",
+    "three": "^0.186.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/three": "^0.186.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.1"
+  }
+}

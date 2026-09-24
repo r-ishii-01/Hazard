@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>鵠沼海岸 津波シミュレーター</title>
+    <meta name="description" content="神奈川県藤沢市・鵠沼海岸周辺を対象にした、地震による津波の浸水を2D/3Dで可視化する学習用シミュレーター" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M4 40c8-10 16-10 24 0s16 10 24 0 8-6 8-6v26H4z' fill='%230ea5e9'/%3E%3Cpath d='M4 28c8-10 16-10 24 0s16 10 24 0' fill='none' stroke='%230369a1' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="app-header"></header>
+      <aside id="sidebar"></aside>
+      <main id="stage">
+        <div id="view-2d" class="view" aria-label="2D地図"></div>
+        <div id="view-3d" class="view" aria-label="3Dビュー"></div>
+        <div id="hud"></div>
+      </main>
+      <footer id="timeline"></footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
