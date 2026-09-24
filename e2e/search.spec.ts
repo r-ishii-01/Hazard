@@ -231,11 +231,29 @@ test.describe('スマートフォン幅', () => {
     await expect(chip).toBeVisible();
     await chip.tap();
     await expect.poll(() => page.evaluate(() => window.__app.store.get().people.length)).toBe(1);
-    // スマートフォンではシートを自動で開かず、ボタンで人物タブを開ける
+    // スマートフォンでは、パネルが地図の上半分以上を覆って置いた人物を隠すので、パネルを閉じて地図の人物を見せ、
+    // 下に短い知らせを出す（シートは自動で開かず、知らせのボタンで人物タブを開ける）
+    await expect(panel).toBeHidden();
+    const toast = page.locator('#hud .hud-toast');
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText('「大人 1」を置きました');
     await expect(page.locator('#sidebar')).toHaveAttribute('data-sheet', 'closed');
-    await page.getByRole('button', { name: '人物タブを開く' }).tap();
+    const person = await page.evaluate(() => window.__app.store.get().people[0]);
+    await page.waitForFunction(() => !window.__map2d!.map.isMoving(), null, { timeout: 10_000 });
+    const marker = await page.evaluate(([x, y]) => {
+      const map = window.__map2d!.map;
+      const p = map.project([x, y]);
+      const r = map.getCanvas().getBoundingClientRect();
+      return { x: r.left + p.x, y: r.top + p.y, top: r.top, bottom: r.bottom };
+    }, [person.lon, person.lat] as const);
+    // 人物は地図の見えている所にあり、知らせ・左上の表示に隠れない
+    expect(marker.y).toBeGreaterThan(marker.top + 120);
+    const tb = (await toast.boundingBox())!;
+    expect(marker.y < tb.y - 10 || marker.y > tb.y + tb.height + 10).toBe(true);
+    await toast.getByRole('button', { name: '人物タブを開く' }).tap();
     await expect(page.locator('#sidebar')).toHaveAttribute('data-sheet', 'open');
     await expect(page.locator('#panel-people')).toBeVisible();
+    await expect(toast).toBeHidden();
 
     const o = await page.evaluate(() => ({ doc: document.documentElement.scrollWidth, width: document.documentElement.clientWidth }));
     expect(o.doc).toBeLessThanOrEqual(o.width);

@@ -696,4 +696,9 @@ details.notes p {
   .select-sm {
     height: 40px;
   }
+
+  /* 折りたたみの見出し（「〜についての注記」「前提・仮定」など）も指で押しやすい高さに */
+  details > summary {
+    padding-block: 10px;
+  }
 }

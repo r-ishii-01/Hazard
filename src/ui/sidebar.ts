@@ -128,6 +128,7 @@ export function mountSidebar(el: HTMLElement, ctx: UIContext, mobile: MediaQuery
   };
   handle.addEventListener('pointerup', (e) => endDrag(e, false));
   handle.addEventListener('pointercancel', (e) => endDrag(e, true));
+  handle.addEventListener('lostpointercapture', (e) => endDrag(e, true));
 
   el.replaceChildren(tablist, sheet);
 

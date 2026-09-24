@@ -192,8 +192,6 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
     chips.classList.toggle('is-scrolled-end', over && chips.scrollLeft + chips.clientWidth >= chips.scrollWidth - 2);
   };
   chips.addEventListener('scroll', updateChipsOverflow, { passive: true });
-  // Tab キーで選んだチップが見えるように
-  chips.addEventListener('focusin', (e) => (e.target as HTMLElement).scrollIntoView?.({ block: 'nearest', inline: 'nearest' }));
   if (typeof ResizeObserver === 'function') {
     const ro = new ResizeObserver(() => updateChipsOverflow());
     ro.observe(chips);

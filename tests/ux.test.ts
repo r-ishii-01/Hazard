@@ -16,7 +16,8 @@ import { SHEET_DRAG_THRESHOLD_PX, sheetDragOffset, sheetDragOutcome } from '../s
 import { chooseLabelSide, estimateTextWidth } from '../src/ui/series';
 import { ARRIVAL_BASIS_LABEL, arrivalFactLabel, arrivalKind, arrivalMarkerLabel } from '../src/ui/scenarioText';
 import { completionAnnouncement } from '../src/ui/panels/quake';
-import { GEO_PRIVACY_TEXT, GEO_TILE_NOTE } from '../src/ui/geolocate';
+import { GEO_PRIVACY_TEXT, GEO_TILE_NOTE, GEO_TILE_NOTE_SHORT } from '../src/ui/geolocate';
+import { WARN_AUTO_COMPACT_MS, nextWarnState } from '../src/ui/hud';
 
 describe('地図の上の時刻（狭い画面）', () => {
   it('counts minutes past one hour, like the timeline (80:30)', () => {
@@ -137,11 +138,24 @@ describe('計算が終わったときの読み上げ', () => {
   });
 });
 
+describe('警報カード（広い画面）', () => {
+  it('opens the details and folds back to one line; never stays expanded after a second press', () => {
+    expect(nextWarnState('summary')).toBe('expanded');
+    expect(nextWarnState('expanded')).toBe('compact');
+    expect(nextWarnState('compact')).toBe('expanded');
+  });
+  it('folds to one line after a short while', () => {
+    expect(WARN_AUTO_COMPACT_MS).toBeGreaterThanOrEqual(5_000);
+    expect(WARN_AUTO_COMPACT_MS).toBeLessThanOrEqual(20_000);
+  });
+});
+
 describe('現在地の扱いの説明', () => {
   it('does not claim that nothing about the location leaves the device', () => {
     expect(GEO_PRIVACY_TEXT).not.toContain('外部には送信しません');
     expect(GEO_PRIVACY_TEXT).toContain('座標');
     expect(GEO_TILE_NOTE).toContain('おおよその場所');
     expect(GEO_TILE_NOTE).toContain('配信元');
+    expect(GEO_TILE_NOTE_SHORT).toContain('おおよその場所');
   });
 });

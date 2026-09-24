@@ -150,6 +150,7 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
   const renderPointerTexts = (coarse: boolean) => {
     const verb = tapVerb(coarse);
     setText(hintVerb, `地図を${verb}して配置`);
+    setText(hintEsc, coarse ? '' : '（Escで終了）');
     setHidden(hintEsc, coarse);
     setText(empty, `まだ人物がいません。上のボタンを押してから、地図上を${verb}して配置してください。`);
     setText(lead, `種類を選んで地図上を${verb}すると、地震発生時にその場所にいた人を置けます。避難の様子と、その場所の浸水の深さを確かめられます。`);

@@ -135,7 +135,13 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
     clearWarnTimer();
     applyWarnState();
   };
-  warnCard.addEventListener('click', () => setWarnState(nextWarnState(warnState)));
+  // 利用者が押して選んだ形は、同じ警報の間はそのまま（出し直しても最初の形に戻さない）
+  let warnUserSet = false;
+  let warnShown = false;
+  warnCard.addEventListener('click', () => {
+    warnUserSet = true;
+    setWarnState(nextWarnState(warnState));
+  });
   // 広い画面: 出てからしばらくすると 1 行にたたむ（押すと詳細を開ける。見出しはいつも見える）
   let warnTimer = 0;
   const clearWarnTimer = () => {
@@ -208,7 +214,7 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
   const cursorChip = h('div', { class: 'hud-chip hud-cursor', hidden: true }, icon('crosshair', 16), cursorText);
 
   // ---- 右中央: 表示中の色分けの凡例 ------------------------------------------------
-  const legend = createHudLegend(ctx);
+  const legend = createHudLegend(ctx, el);
 
   // 上中央は 2D 地図側のヒント・通知が使うため、状態チップは下中央にまとめる。
   // 四隅は地図の操作部品（2D）・視点リセット・倍率の注記・出典（3D）が使うので、凡例は右端の中央に置く
@@ -242,6 +248,12 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
     const showAt = warningShowSec(sc);
     const showWarn = !!warn && (showAt !== null ? t >= showAt : sc.warning !== 'none' && (s.time.playing || t > 0));
     setHidden(warnCard, !showWarn);
+    if (showWarn && !warnShown && !warnUserSet && warnState !== 'summary') {
+      // 出し直したとき（時刻を戻して再生した等）は、もう一度とるべき行動まで見せる
+      warnState = 'summary';
+      applyWarnState();
+    }
+    warnShown = showWarn;
     if (showWarn) armWarnTimer();
     else clearWarnTimer();
 
@@ -288,6 +300,7 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
       // 別の区分の警報になったら、もう一度とるべき行動まで見せる（広い画面）
       if (warnCard.dataset.level !== level) {
         clearWarnTimer();
+        warnUserSet = false;
         warnState = 'summary';
         applyWarnState();
       }
@@ -448,9 +461,10 @@ function swatchRows(items: { label: string; color: string }[]): HTMLElement {
  * 表示中の色分けの凡例。公式の津波浸水想定（重ねるハザードマップ）と計算結果の浸水深は同じ配色
  * （data/sources.ts の DEPTH_CLASSES）なので1つにまとめ、どちらを表示中かを見出しで示す。
  */
-function createHudLegend(ctx: UIContext): HTMLElement {
+function createHudLegend(ctx: UIContext, hud: HTMLElement): HTMLElement {
   const { store } = ctx;
-  const narrow = ctx.isMobile();
+  // 狭い画面・地図の幅が狭いとき（タブレットの縦向きなど）は、最初はたたんでおく（開閉は覚える）
+  const narrow = ctx.isMobile() || (hud.clientWidth > 0 && hud.clientWidth < 600);
   let collapsed = readLegendCollapsed(narrow);
 
   const depthTitle = h('span', { class: 'hud-legend-title' });
