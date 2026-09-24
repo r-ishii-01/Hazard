@@ -165,7 +165,8 @@ test('震度を選ぶとシナリオと計算条件が切り替わる', async ({
     coastHeight: 8.8,
     arrivalMin: 8,
     tideTP: 0.85,
-    durationMin: 60,
+    // 周期20分（公式波形の後続波の間隔にもとづく）→ 到達8分 + 3周期 = 68分 → 選択肢から90分
+    durationMin: 90,
   });
   await expect(selectedCard).toHaveAttribute('data-id', 'sagami-west');
   await expect(presetNote).toContainText('相模トラフ沿いの海溝型地震（西側モデル）');
