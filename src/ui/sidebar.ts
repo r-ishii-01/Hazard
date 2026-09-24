@@ -3,6 +3,7 @@
  */
 import type { TabId, UIContext } from './context';
 import { h, setHidden, setText } from './dom';
+import { sheetDragOffset, sheetDragOutcome } from './gestures';
 import { icon, type IconName } from './icons';
 import { createInfoPanel } from './panels/info';
 import { createLayersPanel } from './panels/layers';
@@ -76,15 +77,57 @@ export function mountSidebar(el: HTMLElement, ctx: UIContext, mobile: MediaQuery
 
   const sheetTitle = h('span', { class: 'sheet-title' });
   const expandBtn = h('button', { type: 'button', class: 'icon-btn sheet-expand', 'aria-label': 'パネルを広げる', 'aria-expanded': 'false' }, icon('chevronUp', 18));
-  expandBtn.addEventListener('click', () => {
-    const expanded = el.classList.toggle('is-expanded');
+  const setExpanded = (expanded: boolean) => {
+    el.classList.toggle('is-expanded', expanded);
     expandBtn.setAttribute('aria-label', expanded ? 'パネルを縮める' : 'パネルを広げる');
     expandBtn.setAttribute('aria-expanded', String(expanded));
-  });
+  };
+  expandBtn.addEventListener('click', () => setExpanded(!el.classList.contains('is-expanded')));
   const closeBtn = h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'パネルを閉じる', onclick: () => setOpen(false) }, icon('close', 18));
   const handle = h('div', { class: 'sheet-handle' }, h('span', { class: 'grip', 'aria-hidden': 'true' }), sheetTitle, expandBtn, closeBtn);
   const panelBox = h('div', { class: 'tab-panels' });
   const sheet = h('div', { class: 'sheet' }, handle, panelBox);
+
+  // ---- つまみ（シートの上端）のドラッグ: 上へ動かすと広げる、下へ動かすと縮める・閉じる（gestures.ts） ----------
+  // ボタン（広げる・閉じる）はそのまま使える。ドラッグはスマートフォン幅でシートが開いているときだけ
+  let drag: { id: number; y0: number; lastY: number; lastT: number; v: number } | null = null;
+  handle.addEventListener('pointerdown', (e) => {
+    if (!mobile.matches || !open || drag) return;
+    if ((e.target as Element | null)?.closest('button')) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    drag = { id: e.pointerId, y0: e.clientY, lastY: e.clientY, lastT: e.timeStamp, v: 0 };
+    try {
+      handle.setPointerCapture(e.pointerId);
+    } catch {
+      /* 取り込めなくてもドラッグはできる */
+    }
+    sheet.classList.add('is-dragging');
+  });
+  handle.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dt = Math.max(1, e.timeStamp - drag.lastT);
+    // 速さは直近の動きを重く見る（フリックの判定用）
+    drag.v = drag.v * 0.3 + ((e.clientY - drag.lastY) / dt) * 0.7;
+    drag.lastY = e.clientY;
+    drag.lastT = e.timeStamp;
+    sheet.style.transform = `translateY(${sheetDragOffset(e.clientY - drag.y0)}px)`;
+  });
+  const endDrag = (e: PointerEvent, cancelled: boolean) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const d = drag;
+    drag = null;
+    const dy = e.clientY - d.y0;
+    // 指を止めてから離した場合は、払ったとはみなさない
+    const v = e.timeStamp - d.lastT > 120 ? 0 : d.v;
+    const outcome = cancelled ? 'none' : sheetDragOutcome(dy, v, el.classList.contains('is-expanded'), sheet.getBoundingClientRect().height);
+    sheet.classList.remove('is-dragging');
+    sheet.style.transform = '';
+    if (outcome === 'expand') setExpanded(true);
+    else if (outcome === 'shrink') setExpanded(false);
+    else if (outcome === 'close') setOpen(false);
+  };
+  handle.addEventListener('pointerup', (e) => endDrag(e, false));
+  handle.addEventListener('pointercancel', (e) => endDrag(e, true));
 
   el.replaceChildren(tablist, sheet);
 
@@ -141,11 +184,7 @@ export function mountSidebar(el: HTMLElement, ctx: UIContext, mobile: MediaQuery
   function setOpen(v: boolean) {
     if (open === v) return;
     open = v;
-    if (!v) {
-      el.classList.remove('is-expanded');
-      expandBtn.setAttribute('aria-label', 'パネルを広げる');
-      expandBtn.setAttribute('aria-expanded', 'false');
-    }
+    if (!v) setExpanded(false);
     render();
     if (v) fireShow(active);
   }

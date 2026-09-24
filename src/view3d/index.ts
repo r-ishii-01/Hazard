@@ -10,6 +10,10 @@
  *
  * 視点移動の要求（store.focus。地名検索・現在地など）は、注視点・距離・向きを別々に補間してなめらかに移す
  * （3D を表示していない間に来た要求は、表示したときに反映する）。現在地（store.userLocation）は目印で示す。
+ *
+ * 計算結果は core/results.ts の usableOutput（今の地形の格子の上で計算した結果）だけを描く。解像度を変えた直後など、
+ * 別の格子の結果を今の地形に重ねると、セルの並びがずれて海が干上がったり内陸に水の帯が出たりするため。
+ * 3D を表示していない間に計算結果が変わったら、前の結果（全フレーム）への参照を手放す（メモリを残さない）。
  */
 import {
   ACESFilmicToneMapping,
@@ -30,6 +34,7 @@ import {
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { AppStore } from '../core/store';
 import type { AppActions } from '../core/controller';
+import { resultParams, usableOutput } from '../core/results';
 import { INITIAL_CENTER, createGridSpec, lonLatToLocalMeters, metersPerPixel, TILE_SIZE, type GridSpec } from '../core/geo';
 import { CELL_LAND, CELL_SEA, type AppState, type Basemap, type MapFocus, type SimOutput, type TerrainGrid } from '../core/types';
 import {
@@ -51,7 +56,7 @@ import { PeopleLayer } from './people';
 import { HeightSampler } from './sampler';
 import { ShelterLayer } from './shelters';
 import { TerrainLayer } from './terrain';
-import { TileCanvas } from './tileCanvas';
+import { TileCanvas, sameExtent } from './tileCanvas';
 import { WaterLayer, type FloodColorMode } from './water';
 import { hazardTileMayExist } from '../map2d/hazardTiles';
 
@@ -72,6 +77,8 @@ const FOCUS_MAX_DISTANCE = 20000;
 /** 操作が無いとき、さざ波のアニメーションを続ける時間 [ms] */
 const IDLE_ANIMATION_MS = 30000;
 const IDLE_FPS = 24;
+/** 再生中、水面の次のキーフレームを先に求めるのに 1 フレームあたり使う時間 [ms] */
+const WATER_PREFETCH_MS = 4;
 /** 地理院タイルなどを貼るキャンバスの上限 [px] */
 const MAX_TEXTURE = 4096;
 
@@ -151,6 +158,8 @@ export class View3D {
   private sampler: HeightSampler | null = null;
   private frameSpec: GridSpec;
   private basemapTiles: TileCanvas | null = null;
+  /** 地図タイルのキャンバスを作ったときの格子（範囲が同じなら解像度を変えても使い回す） */
+  private tilesSpec: GridSpec | null = null;
   private reliefTiles: TileCanvas | null = null;
   private hazardTiles: TileCanvas | null = null;
   private seen: Seen;
@@ -184,6 +193,7 @@ export class View3D {
   private sheltersDirty = true;
   /** 建物に付ける色分けのテクスチャ（最大浸水深・到達時間） */
   private overlayTex: DataTexture | null = null;
+  private readonly unsubscribe: () => void;
 
   constructor(container: HTMLElement, store: AppStore, actions: AppActions) {
     this.container = container;
@@ -219,6 +229,13 @@ export class View3D {
       attribution: '',
     };
     this.overlay = new Overlay(container, { onReset: () => this.resetView(true) });
+    // 表示していない間に計算結果が変わった（新しい計算・地形の読み込み直し）: 前の結果を持ち続けない
+    this.unsubscribe = store.select(
+      (st) => st.sim.output,
+      () => {
+        if (!this.active) this.releaseOutput();
+      },
+    );
     // E2E テスト・デバッグ用
     (container as HTMLElement & { __view3d?: View3D }).__view3d = this;
     this.buildings = new BuildingLayer(() => {
@@ -289,6 +306,8 @@ export class View3D {
     });
     this.on(el, 'webglcontextrestored', () => {
       this.overlay.setMessage(null);
+      // 建物の頂点データは GPU に送った後に手放しているので、作り直す（buildings.ts）
+      this.buildings.rebuild();
       this.needsRender = true;
     });
 
@@ -320,6 +339,7 @@ export class View3D {
     if (this.disposed) return;
     this.disposed = true;
     this.active = false;
+    this.unsubscribe();
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.ro?.disconnect();
@@ -356,6 +376,22 @@ export class View3D {
     this.touch();
   }
 
+  /**
+   * 計算結果への参照を手放す（水面のフレーム・最大浸水深などの色分けの元・人物の避難計画）。
+   * 次に表示するときに、その時点の結果から作り直す。
+   */
+  private releaseOutput(): void {
+    const seen = this.seen;
+    seen.output = null;
+    seen.overlayOutput = null;
+    seen.overlayFrames = -1;
+    seen.t = NaN;
+    this.water.releaseOutput();
+    // 人物の避難計画も（計画は、計算結果を参照する状態判定のキャッシュのキーになっている）
+    seen.plans = null;
+    this.people.releasePlans();
+  }
+
   /** テスト・デバッグ用の内部情報 */
   debugInfo(): Record<string, unknown> {
     const r = this.renderer;
@@ -376,6 +412,7 @@ export class View3D {
       focusSeq: this.seen.focusSeq,
       markers: this.markers.hasContent,
       waterUpdateMs: this.water.lastUpdateMs,
+      water: { keyframes: this.water.keyframeBuilds, uploadMB: +(this.water.uploadBytes / 1e6).toFixed(1), holdsOutput: this.water.holdsOutput },
       viewport: [this.viewportW, this.viewportH],
     };
   }
@@ -412,6 +449,8 @@ export class View3D {
     if (this.needsRender || (animate && now - this.lastRender >= minInterval - 2)) this.render(now);
 
     if (this.hoverPending && now - this.lastHover > 60) this.processHover(now);
+    // 再生中は、次に使う水面のキーフレームを描画の合間に少しずつ求めておく（出力フレームの境目で描画が遅れないように）
+    if (playing && this.seen.output && this.seen.simFlood) this.water.prefetch(WATER_PREFETCH_MS);
   };
 
   private render(now: number): void {
@@ -452,10 +491,20 @@ export class View3D {
     if (grid !== seen.grid) {
       seen.grid = grid;
       this.setGrid(grid);
-      seen.basemap = null; // タイルの範囲がグリッドに依存
-      seen.reliefOn = false;
-      seen.hazardOn = false;
-      seen.hazardOpacity = -1;
+      // 地図タイルのキャンバス: 地形の読み込み中（grid が null）はそのまま残す
+      if (grid) {
+        if (this.tilesSpec && sameExtent(this.tilesSpec, grid.spec)) {
+          // 解像度が違っても計算範囲（タイルを貼る範囲）は同じ: キャンバスはそのまま使う。
+          // 陸を含むタイルだけ取得しているので、新しい格子で陸になったタイルがあれば追加で取得する
+          for (const tc of [this.basemapTiles, this.reliefTiles, this.hazardTiles]) tc?.addTiles(this.landTileFilter(grid));
+        } else {
+          seen.basemap = null; // タイルの範囲がグリッドに依存
+          seen.reliefOn = false;
+          seen.hazardOn = false;
+          seen.hazardOpacity = -1;
+        }
+        this.tilesSpec = grid.spec;
+      }
       seen.people = null;
       seen.shelters = null;
       seen.overlayOutput = null;
@@ -483,46 +532,8 @@ export class View3D {
       this.touch();
     }
 
-    // 地図タイル
-    if (grid && s.basemap !== seen.basemap) {
-      seen.basemap = s.basemap;
-      this.basemapTiles?.dispose();
-      this.basemapTiles = this.createTiles(grid, BASEMAPS[s.basemap], 17);
-      this.terrain.setMap(this.basemapTiles.texture);
-      // 写真のときは建物の屋根にも写真の色を付ける（白い箱が並んで写真が隠れないように）
-      this.buildings.setMap(s.basemap === 'photo' ? this.basemapTiles.texture : null, 0.9);
-      seen.attribution = '';
-      this.touch();
-    }
-    const reliefOn = !!grid && s.layers.elevation;
-    if (reliefOn !== seen.reliefOn) {
-      seen.reliefOn = reliefOn;
-      this.reliefTiles?.dispose();
-      this.reliefTiles = reliefOn && grid ? this.createTiles(grid, RELIEF_TILES, 15) : null;
-      this.terrain.setRelief(this.reliefTiles?.texture ?? null, 0.75);
-      seen.attribution = '';
-      this.touch();
-    }
-    const hazardOn = !!grid && s.layers.officialHazard;
-    if (hazardOn !== seen.hazardOn) {
-      seen.hazardOn = hazardOn;
-      this.hazardTiles?.dispose();
-      // 公式の浸水想定はズーム15（約4.8 m/画素）で十分（地形のセルは約8〜31 m）。存在しないタイルは要求しない
-      this.hazardTiles = hazardOn && grid ? this.createTiles(grid, HAZARD_TSUNAMI_TILES, 15, (x, y, z) => hazardTileMayExist(z, x, y)) : null;
-      seen.hazardOpacity = -1;
-      seen.attribution = '';
-      this.touch();
-    }
-    if (hazardOn && s.layers.officialHazardOpacity !== seen.hazardOpacity) {
-      seen.hazardOpacity = s.layers.officialHazardOpacity;
-      const op = Math.max(0, Math.min(1, s.layers.officialHazardOpacity));
-      this.terrain.setHazard(this.hazardTiles?.texture ?? null, op);
-      this.buildings.setHazard(this.hazardTiles?.texture ?? null, op);
-      this.touch();
-    } else if (!hazardOn) {
-      this.terrain.setHazard(null, 0);
-      this.buildings.setHazard(null, 0);
-    }
+    // 地図タイル（地形の読み込み中は、作ってあるものをそのまま残す）
+    if (grid) this.applyTiles(s, grid);
 
     if (s.layers.buildings !== seen.buildingsOn) {
       seen.buildingsOn = s.layers.buildings;
@@ -536,10 +547,10 @@ export class View3D {
       this.touch();
     }
 
-    // 水面
-    const output = s.sim.output;
+    // 水面（今の地形の格子の上で計算した結果だけ。潮位は表示中の結果を計算した条件の値）
+    const output = usableOutput(s);
     const simFlood = s.layers.simFlood;
-    const tide = s.params.tideTP;
+    const tide = resultParams(s).tideTP;
     if (output !== seen.output || s.time.t !== seen.t || tide !== seen.tide || simFlood !== seen.simFlood || (output && s.sim.status === 'running')) {
       const tChanged = s.time.t !== seen.t || output !== seen.output;
       seen.output = output;
@@ -657,11 +668,54 @@ export class View3D {
     if (this.needsRender) this.lastActivity = now;
   }
 
-  private createTiles(grid: TerrainGrid, source: (typeof BASEMAPS)['pale'], maxZoom: number, exists?: (x: number, y: number, z: number) => Promise<boolean>): TileCanvas {
-    const r = this.renderer!;
+  /** 地図タイル（背景地図・色別標高・公式の浸水想定）を地形に貼る。地形があるときだけ呼ぶ */
+  private applyTiles(s: AppState, grid: TerrainGrid): void {
+    const seen = this.seen;
+    if (s.basemap !== seen.basemap) {
+      seen.basemap = s.basemap;
+      this.basemapTiles?.dispose();
+      this.basemapTiles = this.createTiles(grid, BASEMAPS[s.basemap], 17);
+      this.terrain.setMap(this.basemapTiles.texture);
+      // 写真のときは建物の屋根にも写真の色を付ける（白い箱が並んで写真が隠れないように）
+      this.buildings.setMap(s.basemap === 'photo' ? this.basemapTiles.texture : null, 0.9);
+      seen.attribution = '';
+      this.touch();
+    }
+    const reliefOn = s.layers.elevation;
+    if (reliefOn !== seen.reliefOn) {
+      seen.reliefOn = reliefOn;
+      this.reliefTiles?.dispose();
+      this.reliefTiles = reliefOn ? this.createTiles(grid, RELIEF_TILES, 15) : null;
+      this.terrain.setRelief(this.reliefTiles?.texture ?? null, 0.75);
+      seen.attribution = '';
+      this.touch();
+    }
+    const hazardOn = s.layers.officialHazard;
+    if (hazardOn !== seen.hazardOn) {
+      seen.hazardOn = hazardOn;
+      this.hazardTiles?.dispose();
+      // 公式の浸水想定はズーム15（約4.8 m/画素）で十分（地形のセルは約8〜31 m）。存在しないタイルは要求しない
+      this.hazardTiles = hazardOn ? this.createTiles(grid, HAZARD_TSUNAMI_TILES, 15, (x, y, z) => hazardTileMayExist(z, x, y)) : null;
+      seen.hazardOpacity = -1;
+      seen.attribution = '';
+      this.touch();
+    }
+    if (hazardOn && s.layers.officialHazardOpacity !== seen.hazardOpacity) {
+      seen.hazardOpacity = s.layers.officialHazardOpacity;
+      const op = Math.max(0, Math.min(1, s.layers.officialHazardOpacity));
+      this.terrain.setHazard(this.hazardTiles?.texture ?? null, op);
+      this.buildings.setHazard(this.hazardTiles?.texture ?? null, op);
+      this.touch();
+    } else if (!hazardOn) {
+      this.terrain.setHazard(null, 0);
+      this.buildings.setHazard(null, 0);
+    }
+  }
+
+  /** 陸のセルを含むタイルか（海だけのタイルは取得しない） */
+  private landTileFilter(grid: TerrainGrid): (x: number, y: number, z: number) => boolean {
     const spec = grid.spec;
-    // 陸のセルを含むタイルだけ取得（海だけのタイルは使わない）
-    const landTile = (x: number, y: number, z: number): boolean => {
+    return (x, y, z) => {
       const scale = Math.pow(2, spec.zoom - z);
       const i0 = Math.max(0, Math.floor((x * TILE_SIZE * scale - spec.originPx) / spec.cellPx));
       const i1 = Math.min(spec.nx - 1, Math.floor(((x + 1) * TILE_SIZE * scale - spec.originPx) / spec.cellPx));
@@ -670,13 +724,18 @@ export class View3D {
       for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) if (grid.kind[j * spec.nx + i] !== CELL_SEA) return true;
       return false;
     };
+  }
+
+  private createTiles(grid: TerrainGrid, source: (typeof BASEMAPS)['pale'], maxZoom: number, exists?: (x: number, y: number, z: number) => Promise<boolean>): TileCanvas {
+    const r = this.renderer!;
+    const spec = grid.spec;
     return new TileCanvas({
       spec,
       source,
       maxSize: Math.min(MAX_TEXTURE, r.capabilities.maxTextureSize),
       maxZoom,
       anisotropy: Math.min(8, r.capabilities.getMaxAnisotropy()),
-      filter: landTile,
+      filter: this.landTileFilter(grid),
       exists,
       onUpdate: () => {
         this.needsRender = true;
@@ -989,10 +1048,12 @@ export class View3D {
     const s = this.store.get();
     const grid = s.terrain.grid;
     if (!grid || !this.sampler || grid !== this.sampler.grid) return;
+    // 今の地形の格子の上で計算した結果だけで判定する（別の格子の結果ではセルの並びがずれる）
+    const output = usableOutput(s);
     this.people.update({
       t: s.time.t,
       grid,
-      output: s.sim.output,
+      output,
       sampler: this.sampler,
       exag: this.world.scale.y,
       scale: this.scale,
@@ -1002,7 +1063,7 @@ export class View3D {
       selectedId: s.selectedPersonId,
       camera: this.camera,
       viewportW: this.viewportW,
-      showFlood: s.layers.simFlood && !!s.sim.output,
+      showFlood: s.layers.simFlood && !!output,
       waterSurfaceAt: this.waterSurfaceAt,
       reserved,
     });
@@ -1108,10 +1169,11 @@ export class View3D {
     const ground = this.sampler.height(hit.x, hit.z);
     let depth: number | null = null;
     let waterDepth: number | undefined;
-    const out = s.sim.output;
+    // 今の地形の格子の上で計算した結果だけ（サンプラーも同じ格子のものであること）
+    const out = this.sampler.grid === s.terrain.grid ? usableOutput(s) : null;
     const k = this.sampler.cellIndex(hit.x, hit.z);
     const sea = k >= 0 && this.sampler.grid.kind[k] === CELL_SEA;
-    if (out && out.framesReady() > 0 && k >= 0 && out.spec.nx === this.sampler.grid.spec.nx && out.spec.ny === this.sampler.grid.spec.ny) {
+    if (out && out.framesReady() > 0 && k >= 0) {
       const d = out.depthAt(Math.max(0, Math.min(s.time.t, out.timeReady())), k);
       // 海・川のセルの全水深は「浸水深」ではないので、水深として別に渡す（2D 地図と同じ扱い）
       if (sea) waterDepth = Number.isFinite(d) ? Math.max(0, d) : undefined;

@@ -6,7 +6,9 @@ import type { Page } from '@playwright/test';
 import { INITIAL_CENTER } from '../src/core/geo';
 import { describeProblems, expect, openReadyApp, test, type ExternalRequest } from './fixtures';
 
-const PRIVACY = '現在地はこの端末内でのみ使用し、外部には送信しません。';
+const PRIVACY = '現在地の座標は外部に送信せず、この端末内でだけ使います。';
+/** 座標は送らないが、地図を現在地へ移すと周辺の地図画像を読み込むので、おおよその場所は配信元に伝わる */
+const TILE_NOTE = 'おおよその場所（数百m程度）は配信元に伝わります';
 
 async function waitForMap(page: Page): Promise<void> {
   await page.waitForFunction(() => !!window.__map2d?.map?.isStyleLoaded(), null, { timeout: 60_000 });
@@ -37,6 +39,10 @@ test.describe('計算範囲の中', () => {
     await expect(panel).toContainText('現在地は計算範囲の中です');
     await expect(panel).toContainText('誤差 約 25 m');
     await expect(panel).toContainText(PRIVACY);
+    await expect(panel).toContainText(TILE_NOTE);
+    // 「外部には何も送らない」とは書かない（地図の画像の読み込みで大まかな場所は伝わる）
+    await expect(page.locator('body')).not.toContainText('外部には送信しません');
+    await expect(page.getByRole('button', { name: '現在地', exact: true })).toHaveAttribute('title', '現在地（座標は外部に送信しません）');
 
     // 地図: 現在地へ移動し、点と精度の円を出す
     await expect.poll(() => page.evaluate(() => window.__app.store.get().focus)).toMatchObject({ lon: HERE.longitude, lat: HERE.latitude, zoom: 16 });

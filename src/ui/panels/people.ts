@@ -2,20 +2,25 @@
  * 「人物」タブ: 人物の配置（地図のクリック・地名検索・現在地）、一覧（状態をおよそ 4 Hz で更新）、
  * 選択中の人物の詳細（住所の目安を含む）と浸水深グラフ。
  */
-import type { AppState, EvacMode, EvacPlan, Person, PersonKind, PersonState, PersonStatus, ShelterKind, SimOutput, TerrainGrid } from '../../core/types';
+import type { AppState, EvacMode, EvacPlan, OfficialInundationState, Person, PersonKind, PersonState, PersonStatus, ShelterKind, SimOutput, TerrainGrid } from '../../core/types';
 import { CELL_SEA } from '../../core/types';
 import { lonLatToCell } from '../../core/geo';
-import { PERSON_PROFILES, personStateAt } from '../../people';
+import { formatSpan } from '../../core/format';
+import { cellArrival, resultCoverage, usableOutput, type ResultCoverage } from '../../core/results';
+import { PERSON_PROFILES, STAY_STATUS_DESCRIPTION, criticalEncounter, personStateAt } from '../../people';
 import { safeCall, timelineDuration, type UIContext } from '../context';
 import { Scope, extLink, h, s as svg, setAttr, setHidden, setText, throttle } from '../dom';
 import { selectField, sliderField } from '../fields';
 import { formatDepth, formatDistance, formatElapsed, isSafeColor, readableTextColor } from '../format';
 import { icon } from '../icons';
-import { niceTicks, timeTickStep } from '../series';
-import { sheltersInfoLine } from '../shelterInfo';
-import { STATUS_ORDER, statusDescription, statusMeta, statusSeverity, thresholdInfos, type ThresholdInfo } from '../status';
+import { chooseLabelSide, estimateTextWidth, niceTicks, timeTickStep } from '../series';
+import { isCoarsePointer, tapVerb, watchPointer } from '../pointer';
+import { shelterUsageNotice, sheltersInfoLine } from '../shelterInfo';
+import { OFFICIAL_ZONE_CREDIT, officialPointInfo, type OfficialPointInfo } from '../../data/officialHazard';
+import { FUJISAWA_TSUNAMI_HAZARDMAP_URL } from '../links';
+import { STATUS_ORDER, personStatusMeta, statusDescription, statusMeta, statusSeverity, thresholdInfos, type ThresholdInfo } from '../status';
 import { GSI_MAPS_API_NOTE_URL, GSI_REVERSE_CREDIT } from '../geoSearch';
-import { GEO_PRIVACY_TEXT } from '../geolocate';
+import { GEO_PRIVACY_TEXT, GEO_TILE_NOTE_SHORT } from '../geolocate';
 import type { AddressState } from '../personAddress';
 
 const EVAC_LABEL: Record<EvacMode, string> = {
@@ -37,10 +42,10 @@ function profileColor(kind: PersonKind): string {
   return isSafeColor(c) ? c : '#2563eb';
 }
 
-/** personStateAt を安全に呼ぶ（他モジュールの例外で UI を壊さない） */
+/** personStateAt を安全に呼ぶ（他モジュールの例外で UI を壊さない）。計算結果は今の地形の上の結果だけを使う */
 function stateAt(p: Person, s: AppState, t: number): PersonState | null {
   try {
-    return personStateAt(p, s.plans[p.id], s.terrain.grid, s.sim.output, t);
+    return personStateAt(p, s.plans[p.id], s.terrain.grid, usableOutput(s), t);
   } catch (e) {
     console.warn('[ui] personStateAt failed', e);
     return null;
@@ -68,14 +73,15 @@ function statusChip(): HTMLElement {
 
 /** チップごとの最後の表示内容（変化がなければ DOM を触らない） */
 const lastChipKey = new WeakMap<HTMLElement, string>();
-function updateChip(chip: HTMLElement, st: PersonState | null): void {
+/** person を渡すと、「その場にとどまる」人の浸水していない間は「とどまっている」と示す */
+function updateChip(chip: HTMLElement, st: PersonState | null, person?: Pick<Person, 'evacMode'> | null): void {
   const status: PersonStatus = st?.status ?? 'waiting';
   const depth = st?.depth ?? 0;
-  const text = statusMeta(status).label + (statusSeverity(status) > 0 && depth >= 0.01 ? ` ${formatDepth(depth)}` : '');
-  const key = `${status}|${text}`;
+  const meta = personStatusMeta(status, person);
+  const text = meta.label + (statusSeverity(status) > 0 && depth >= 0.01 ? ` ${formatDepth(depth)}` : '');
+  const key = `${status}|${text}|${meta.icon}`;
   if (lastChipKey.get(chip) === key) return;
   lastChipKey.set(chip, key);
-  const meta = statusMeta(status);
   chip.style.setProperty('--chip', meta.color);
   chip.style.setProperty('--chip-fg', readableTextColor(meta.color));
   chip.dataset.status = status;
@@ -111,11 +117,14 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
       h('span', { class: 'place-speed' }, `${pr.speedMps.toFixed(1)} m/s`),
     );
   });
+  // 「クリック」「タップ」・Esc キーの案内は入力の種類に合わせる（タッチ操作の端末では「タップ」、Esc は出さない）
+  const hintVerb = h('span');
+  const hintEsc = h('span', { style: { whiteSpace: 'nowrap' } }, '（Escで終了）');
   const hint = h(
     'div',
     { class: 'placing-hint', role: 'status' },
     icon('pin', 16),
-    h('span', null, '地図をクリックして配置', h('span', { style: { whiteSpace: 'nowrap' } }, '（Escで終了）')),
+    h('span', null, hintVerb, hintEsc),
     h('button', { type: 'button', class: 'btn btn-ghost btn-sm', onclick: () => actions.startPlacing(null) }, '終了'),
   );
   ctx.scope.add(
@@ -132,11 +141,21 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
     h('button', { type: 'button', class: 'btn btn-secondary', onclick: () => ctx.places.openSearch() }, icon('search', 16), '地名・住所で探して置く'),
     h('button', { type: 'button', class: 'btn btn-secondary', onclick: () => ctx.places.locate() }, icon('locate', 16), '現在地に置く'),
   );
-  const entryNote = h('p', { class: 'place-entry-note' }, icon('lock', 14), h('span', null, GEO_PRIVACY_TEXT));
+  const entryNote = h('p', { class: 'place-entry-note' }, icon('lock', 14), h('span', null, `${GEO_PRIVACY_TEXT}${GEO_TILE_NOTE_SHORT}`));
 
   // ---- 一覧 -----------------------------------------------------------------
   const list = h('ul', { class: 'people-list', 'aria-label': '配置した人物' });
-  const empty = h('p', { class: 'empty-state' }, 'まだ人物がいません。上のボタンを押してから、地図上をクリックして配置してください。');
+  const empty = h('p', { class: 'empty-state' });
+  const lead = h('p', { class: 'section-lead' });
+  const renderPointerTexts = (coarse: boolean) => {
+    const verb = tapVerb(coarse);
+    setText(hintVerb, `地図を${verb}して配置`);
+    setHidden(hintEsc, coarse);
+    setText(empty, `まだ人物がいません。上のボタンを押してから、地図上を${verb}して配置してください。`);
+    setText(lead, `種類を選んで地図上を${verb}すると、地震発生時にその場所にいた人を置けます。避難の様子と、その場所の浸水の深さを確かめられます。`);
+  };
+  renderPointerTexts(isCoarsePointer());
+  ctx.scope.add(watchPointer(renderPointerTexts));
   const rows = new Map<string, { li: HTMLElement; btn: HTMLButtonElement; name: HTMLElement; sub: HTMLElement; addr: HTMLElement; chip: HTMLElement; dot: HTMLElement }>();
   const count = h('span', { class: 'count-badge' }, '0');
 
@@ -217,7 +236,7 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
     const s = store.get();
     for (const p of s.people) {
       const row = rows.get(p.id);
-      if (row) updateChip(row.chip, stateAt(p, s, s.time.t));
+      if (row) updateChip(row.chip, stateAt(p, s, s.time.t), p);
     }
     detail.tick();
   };
@@ -226,6 +245,7 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
   ctx.scope.add(store.select((s) => s.time.t, () => throttled()));
   ctx.scope.add(store.select((s) => s.plans, () => throttled()));
   ctx.scope.add(store.select((s) => s.sim.output, () => throttled()));
+  ctx.scope.add(store.select((s) => s.terrain.grid, () => throttled()));
   ctx.scope.add(store.select((s) => s.people, renderList, true));
   ctx.scope.add(ctx.places.addresses.subscribe(() => renderList(store.get().people)));
   ctx.scope.add(store.select((s) => s.selectedPersonId, (id) => renderSelection(id), true));
@@ -233,14 +253,19 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
 
   // ---- 凡例 -----------------------------------------------------------------
   const legend = h('ul', { class: 'status-legend' });
-  const renderLegend = () =>
-    legend.replaceChildren(
-      ...STATUS_ORDER.map((st) => {
-        const chip = statusChip();
-        updateChip(chip, { status: st, depth: 0, lon: 0, lat: 0, ground: 0, message: statusDescription(st) });
-        return h('li', null, chip, h('span', { class: 'legend-desc' }, statusDescription(st)));
-      }),
-    );
+  const renderLegend = () => {
+    const blank = { depth: 0, lon: 0, lat: 0, ground: 0 };
+    const items = STATUS_ORDER.map((st) => {
+      const chip = statusChip();
+      updateChip(chip, { ...blank, status: st, message: statusDescription(st) });
+      return h('li', null, chip, h('span', { class: 'legend-desc' }, statusDescription(st)));
+    });
+    // 「その場にとどまる」人（状態は「避難開始前」と同じだが、避難を始める前ではないので別に示す）
+    const stayChip = statusChip();
+    updateChip(stayChip, { ...blank, status: 'waiting', message: STAY_STATUS_DESCRIPTION }, { evacMode: 'stay' });
+    items.splice(1, 0, h('li', null, stayChip, h('span', { class: 'legend-desc' }, STAY_STATUS_DESCRIPTION)));
+    legend.replaceChildren(...items);
+  };
   renderLegend();
 
   return h(
@@ -250,7 +275,7 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
       'section',
       { class: 'section' },
       h('h2', { class: 'section-title' }, icon('pin', 18), '人物を配置する'),
-      h('p', { class: 'section-lead' }, '種類を選んで地図上をクリックすると、地震発生時にその場所にいた人を置けます。避難の様子と、その場所の浸水の深さを確かめられます。'),
+      lead,
       h('div', { class: 'place-grid', role: 'group', 'aria-label': '配置する人物の種類' }, placeButtons),
       hint,
       entry,
@@ -271,7 +296,14 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
       h('h2', { class: 'section-title' }, icon('info', 18), '状態の見方'),
       legend,
       thresholdSources(),
-      h('p', { class: 'field-hint' }, '状態は、このサイトの簡易計算による浸水深と、設定した歩行速度・避難開始時間から求めた目安です。実際の避難の可否を示すものではありません。'),
+      h(
+        'p',
+        { class: 'field-hint' },
+        '状態は、このサイトの簡易計算による浸水深と、設定した歩行速度・避難開始時間から求めた目安です。実際の避難の可否を示すものではありません。',
+        'このサイトの計算は、公式の津波浸水想定（神奈川県）より浸水が狭く、浅めに出ます。「計算で浸水しない」は「安全」という意味ではありません。避難には',
+        extLink(FUJISAWA_TSUNAMI_HAZARDMAP_URL, '藤沢市の津波ハザードマップ'),
+        'を使ってください。',
+      ),
     ),
   );
 }
@@ -371,6 +403,26 @@ function createDetail(ctx: UIContext): Detail {
     // 避難計画の要約
     const planDl = h('dl', { class: 'plan-dl' });
     const verdict = h('p', { class: 'plan-verdict' });
+    // 公式の想定との関係・避難場所データの注意（常に表示。避難場所の注意は「最寄りの避難場所へ」のときだけ）
+    const shelterNote = h('p', { class: 'plan-note plan-note-shelter', hidden: true }, icon('info', 14), h('span', null, shelterUsageNotice()));
+    const planNotes = h(
+      'div',
+      { class: 'plan-notes' },
+      h(
+        'p',
+        { class: 'plan-note' },
+        icon('alert', 14),
+        h(
+          'span',
+          null,
+          'このサイトの計算は、公式の津波浸水想定（神奈川県）より浸水が狭く、浅めに出ます（同じ地震の県の想定と比べても、浸水域が1〜2割狭い）。避難先・避難経路は',
+          extLink(FUJISAWA_TSUNAMI_HAZARDMAP_URL, '藤沢市の津波ハザードマップ'),
+          'で確認してください。',
+        ),
+      ),
+      shelterNote,
+      h('p', { class: 'plan-note plan-note-source' }, `公式の想定の出典：${OFFICIAL_ZONE_CREDIT}`),
+    );
 
     // グラフ
     const chart = createDepthChart();
@@ -402,6 +454,7 @@ function createDetail(ctx: UIContext): Detail {
       h('h3', { class: 'group-title' }, '避難の見通し（計算上）'),
       planDl,
       verdict,
+      planNotes,
       h('h3', { class: 'group-title' }, 'この人物の位置の浸水深'),
       chart.el,
       h('div', { class: 'detail-actions' }, del),
@@ -424,11 +477,15 @@ function createDetail(ctx: UIContext): Detail {
       const p = getP(s);
       if (!p) return;
       const plan = s.plans[p.id];
-      const out = s.sim.output;
+      const out = usableOutput(s);
       const series = sampleSeries(p, s, ctx.watcher.snap.timeReady);
-      chart.setData(series, timelineDuration(s), thresholdInfos().filter((th) => th.status !== 'caution'));
-      renderPlan(planDl, verdict, p, plan, s.terrain.grid, out, series, s.sim.status === 'running');
+      chart.setData(series, timelineDuration(s), thresholdInfos().filter((th) => th.status !== 'caution'), p);
+      // 完了かどうかは計算の状態ではなく結果そのもので判断する（中止・失敗の後も途中までの結果が残る）
+      renderPlan(planDl, verdict, p, plan, s.terrain.grid, out, series, resultCoverage(s), s.officialInundation);
+      setHidden(shelterNote, p.evacMode !== 'shelter');
       chart.setCursor(s.time.t);
+      // グラフの値が変わったので、現在時刻の読み取り・状態も今のデータで表示し直す（避難のしかたを変えた直後など）
+      tickFn();
     };
     const recomputeThrottled = throttle(recompute, 1000);
     child.add(() => recomputeThrottled.cancel());
@@ -436,6 +493,8 @@ function createDetail(ctx: UIContext): Detail {
     child.add(store.select((s) => s.plans, () => recompute()));
     child.add(store.select((s) => s.terrain.grid, () => recompute()));
     child.add(store.select((s) => s.params.durationMin, () => recompute()));
+    child.add(store.select((s) => s.sim.status, () => recompute()));
+    child.add(store.select((s) => s.officialInundation, () => recompute()));
     child.add(ctx.watcher.subscribe(() => recomputeThrottled(), false));
     recompute();
 
@@ -447,7 +506,7 @@ function createDetail(ctx: UIContext): Detail {
       const p = getP(s);
       if (!p) return;
       const st = stateAt(p, s, s.time.t);
-      updateChip(chip, st);
+      updateChip(chip, st, p);
       setText(msgEl, st?.message ?? '');
       chart.setReadout(s.time.t);
     };
@@ -477,7 +536,7 @@ const SAMPLE_STEP = 20;
 
 /** 人物の位置の浸水深を時刻ごとに求める（計算済みの時刻まで） */
 function sampleSeries(p: Person, s: AppState, timeReady: number): Series {
-  const out = s.sim.output;
+  const out = usableOutput(s);
   const duration = timelineDuration(s);
   const until = out ? Math.min(duration, timeReady) : 0;
   const n = out ? Math.floor(until / SAMPLE_STEP) + 1 : 0;
@@ -494,6 +553,52 @@ function sampleSeries(p: Person, s: AppState, timeReady: number): Series {
   return { t, depth, status, count: n };
 }
 
+/** 公式の想定の説明（例外で UI を壊さない） */
+function officialAt(official: OfficialInundationState | null | undefined, lon: number, lat: number): OfficialPointInfo {
+  return safeCall(() => officialPointInfo(official, lon, lat), { kind: 'loading', cls: null, text: '公式の津波浸水想定を確認できません' } as OfficialPointInfo);
+}
+
+function isShelterTarget(kind: ShelterKind | undefined): boolean {
+  return kind === 'evac-site' || kind === 'tsunami-building';
+}
+
+/**
+ * このサイトの計算では浸水に遭わない場合の判定文と色。公式の津波浸水想定（神奈川県）で出発地点・避難先が浸水する区域なら、
+ * 計算の結果だけで「安全」と読める緑の表示にはしない（計算は公式の想定より浸水が狭く浅めに出る。docs/MODEL.md 4.13.5）。
+ */
+function simSafeVerdict(
+  base: string,
+  p: Person,
+  plan: EvacPlan | undefined,
+  offStart: OfficialPointInfo,
+  offTarget: OfficialPointInfo | null,
+): { text: string; tone: 'ok' | 'warn' | '' } {
+  const stay = p.evacMode === 'stay' || !plan?.target;
+  const parts: string[] = [];
+  if (offStart.kind === 'zone' && offStart.cls) {
+    parts.push(`ただし、公式の津波浸水想定（神奈川県）では、${stay ? 'この地点' : '出発地点'}は浸水深${offStart.cls.label}の区域です。`);
+  }
+  if (!stay && offTarget?.kind === 'zone' && offTarget.cls) {
+    parts.push(
+      isShelterTarget(plan?.target?.kind)
+        ? `避難先の避難場所も、公式の想定では浸水深${offTarget.cls.label}の区域にあります（建物の上階など高い所へ避難する想定です）。`
+        : `避難先も、公式の想定では浸水深${offTarget.cls.label}の区域です。`,
+    );
+  }
+  if (parts.length > 0) {
+    return { text: `${base}${parts.join('')}このサイトの計算は公式の想定より浸水が狭く浅めに出るので、避難には公式のハザードマップを使ってください。`, tone: 'warn' };
+  }
+  const checked = [offStart, ...(stay ? [] : [offTarget])];
+  if (checked.every((o) => o?.kind === 'outside')) {
+    return {
+      text: `${base}公式の津波浸水想定（神奈川県）でも、${stay ? 'この地点は' : '出発地点・避難先とも'}浸水想定区域の外です。`,
+      tone: 'ok',
+    };
+  }
+  // 公式の想定を確かめられない（読み込み中・失敗・範囲外）: 緑にはしない
+  return { text: `${base}公式の津波浸水想定とは照合できていません。藤沢市の津波ハザードマップでも確認してください。`, tone: '' };
+}
+
 function renderPlan(
   dl: HTMLElement,
   verdict: HTMLElement,
@@ -502,19 +607,30 @@ function renderPlan(
   grid: TerrainGrid | null,
   out: SimOutput | null,
   series: Series,
-  running: boolean,
+  cov: ResultCoverage | null,
+  official: OfficialInundationState | null,
 ): void {
+  const complete = !!cov && cov.complete;
+  const running = cov?.state === 'running';
+  /** 途中までの結果の範囲（例:「9分20秒」）。完了なら空 */
+  const until = cov && !complete ? formatSpan(cov.until) : '';
+  const usePlan = plan && plan.personId === p.id ? plan : undefined;
+  // 公式の津波浸水想定（神奈川県）で、出発地点・避難先が何mの区域か
+  const offStart = officialAt(official, p.lon, p.lat);
+  const offTarget = usePlan?.target ? officialAt(official, usePlan.target.lon, usePlan.target.lat) : null;
   const rows: [string, string][] = [];
   if (p.evacMode === 'stay') {
     rows.push(['行動', 'その場にとどまる']);
-  } else if (!plan) {
+  } else if (!usePlan) {
     rows.push(['避難先', grid ? '計算中…' : '地形データの読み込み後に計算します']);
-  } else if (!plan.target) {
+  } else if (!usePlan.target) {
     rows.push(['避難先', '到達できる避難先が見つかりません']);
   } else {
-    rows.push(['避難先', `${plan.target.name}（${SHELTER_KIND_LABEL[plan.target.kind] ?? plan.target.kind}）`]);
-    rows.push(['経路の長さ', formatDistance(plan.distanceM)]);
-    rows.push(['到着', plan.arriveAt !== null && Number.isFinite(plan.arriveAt) ? `地震発生から ${formatElapsed(plan.arriveAt)}` : '到着できません']);
+    // 高台の名前には根拠（「最寄りの高台（…）」「近くで最も高い地点（…）」）が入っているので種類は添えない
+    const kindLabel = usePlan.target.kind === 'highground' ? '' : `（${SHELTER_KIND_LABEL[usePlan.target.kind] ?? usePlan.target.kind}）`;
+    rows.push(['避難先', `${usePlan.target.name}${kindLabel}`]);
+    rows.push(['経路の長さ', formatDistance(usePlan.distanceM)]);
+    rows.push(['到着', usePlan.arriveAt !== null && Number.isFinite(usePlan.arriveAt) ? `地震発生から ${formatElapsed(usePlan.arriveAt)}` : '到着できません']);
   }
 
   // 出発地点への津波の到達（初期に陸だったセルの浸水開始時刻）
@@ -525,15 +641,24 @@ function renderPlan(
     if (!cell) arrivalText = '計算範囲外';
     else {
       const isSea = grid && grid.spec.nx === out.spec.nx && grid.spec.ny === out.spec.ny && grid.kind[cell.k] === CELL_SEA;
-      const a = out.arrival[cell.k];
+      // 途中までの結果では、集計（arrival）が受信済みのフレームより遅れていることがあるのでフレームからも調べる
+      const a = safeCall(() => cellArrival(out, cell.k), Infinity);
       if (isSea) arrivalText = '海域（浸水の判定対象外）';
       else if (Number.isFinite(a)) {
         arrival = a;
         arrivalText = `地震発生から ${formatElapsed(a)}`;
-      } else arrivalText = running ? 'まだ浸水していません（計算中）' : '浸水しない（計算時間内）';
+      } else if (complete) {
+        // 「浸水しない」と言い切らない（計算は公式の想定より浸水が狭く浅めに出る）
+        arrivalText = offStart.kind === 'zone' ? 'この計算では浸水せず（計算時間内）。公式の想定では浸水する区域です' : 'この計算では浸水せず（計算時間内）';
+      }
+      // 途中まで: 「浸水しない」とは言わない
+      else arrivalText = `まだ浸水していません（${until}まで計算${running ? '・計算中' : '。それより後は未計算'}）`;
     }
   }
-  rows.push(['出発地点の浸水', arrivalText]);
+  rows.push([p.evacMode === 'stay' ? 'この地点の浸水' : '出発地点の浸水', arrivalText]);
+  // 公式の想定（計算の結果によらず表示する）
+  rows.push([p.evacMode === 'stay' ? 'この地点（公式）' : '出発地点（公式）', offStart.text]);
+  if (p.evacMode !== 'stay' && offTarget) rows.push(['避難先（公式）', offTarget.text]);
 
   // 経験する最大の浸水
   let worst: PersonStatus = 'waiting';
@@ -549,7 +674,11 @@ function renderPlan(
       worstAt = series.t[i];
     }
   }
-  if (series.count > 0) rows.push(['遭遇する浸水', maxDepth >= 0.01 ? `最大 ${formatDepth(maxDepth)}（避難完了まで）` : 'なし（避難完了まで）']);
+  if (series.count > 0) {
+    // 「その場にとどまる」人は避難しないので「避難完了まで」ではなく計算した時間の範囲
+    const scope = complete ? (p.evacMode === 'stay' ? '計算時間内' : '避難完了まで') : `${until}までの計算の範囲`;
+    rows.push(['遭遇する浸水', maxDepth >= 0.01 ? `最大 ${formatDepth(maxDepth)}（${scope}）` : `この計算ではなし（${scope}）`]);
+  }
 
   dl.replaceChildren(...rows.flatMap(([k, v]) => [h('dt', null, k), h('dd', null, v)]));
 
@@ -557,17 +686,26 @@ function renderPlan(
   let tone: 'ok' | 'warn' | 'danger' | '' = '';
   if (series.count > 0) {
     if (statusSeverity(worst) >= 2) {
+      // 「生命の危険」は、状態の説明（人物の状態のメッセージ）と同じ時刻を示す（グラフの 20 秒ごとの値より正確）
+      if (worst === 'critical' && out) {
+        const hit = safeCall(() => criticalEncounter(p, usePlan, out, Infinity), null);
+        if (hit && Number.isFinite(hit.t)) worstAt = hit.t;
+      }
       text = `地震発生から ${formatElapsed(worstAt)} ごろ「${statusMeta(worst).label}」の状態になります（計算上）。避難開始を早める、より近い高い場所を選ぶなどを確かめてください。`;
       tone = 'danger';
     } else if (statusSeverity(worst) === 1) {
       text = `途中で浅い浸水に遭います（計算上）。避難開始を早めると安全側になります。`;
       tone = 'warn';
-    } else if (plan?.arriveAt != null && arrival !== null && plan.arriveAt < arrival) {
-      text = `出発地点が浸水しはじめる約${Math.max(1, Math.round((arrival - plan.arriveAt) / 60))}分前に避難先に着きます（計算上）。`;
-      tone = 'ok';
-    } else if (!running) {
-      text = '計算した時間内に、この人物の位置が浸水することはありませんでした（計算上）。';
-      tone = 'ok';
+    } else if (usePlan?.arriveAt != null && arrival !== null && usePlan.arriveAt < arrival) {
+      const base = `この計算では、出発地点が浸水しはじめる約${Math.max(1, Math.round((arrival - usePlan.arriveAt) / 60))}分前に避難先に着きます。`;
+      ({ text, tone } = simSafeVerdict(base, p, usePlan, offStart, offTarget));
+    } else if (complete) {
+      const base = p.evacMode === 'stay' ? 'この計算では、計算した時間内にこの人物の位置は浸水しませんでした。' : 'この計算では、計算した時間内にこの人物が浸水に遭うことはありませんでした。';
+      ({ text, tone } = simSafeVerdict(base, p, usePlan, offStart, offTarget));
+    } else if (cov && !running) {
+      // 中止・失敗で途中まで: 安全とは言えないことをはっきり示す
+      text = `計算は地震発生から${until}までで止まっています。その間はこの人物の位置は浸水していませんが、それより後は計算していないため、安全かどうかは分かりません。`;
+      tone = 'warn';
     }
   }
   verdict.textContent = text;
@@ -589,6 +727,8 @@ const STRIP_H = 5;
 function createDepthChart() {
   const grid = svg('g', { class: 'chart-grid' });
   const thresholds = svg('g', { class: 'chart-thresholds' });
+  // しきい値のラベルは線・面の上に描く（線の下にあると、浸水深の線が文字を横切って読めない）
+  const thLabels = svg('g', { class: 'chart-th-labels' });
   const area = svg('path', { class: 'chart-area' });
   const line = svg('path', { class: 'chart-line' });
   const strip = svg('g', { class: 'chart-strip' });
@@ -603,6 +743,7 @@ function createDepthChart() {
     thresholds,
     area,
     line,
+    thLabels,
     strip,
     cursor,
     hoverLine,
@@ -614,6 +755,8 @@ function createDepthChart() {
   const el = h('div', { class: 'chart-wrap' }, root, readout, emptyMsg);
 
   let data: Series | null = null;
+  /** 状態の表示名に使う人物（「その場にとどまる」人は「とどまっている」） */
+  let who: Pick<Person, 'evacMode'> | null = null;
   let duration = 3600;
   let yMax = 1;
   let hoverIdx = -1;
@@ -624,12 +767,13 @@ function createDepthChart() {
   const describe = (i: number) => {
     if (!data || i < 0 || i >= data.count) return '';
     const st = data.status[i];
-    return `${formatElapsed(data.t[i])}：浸水深 ${formatDepth(data.depth[i])}・${statusMeta(st).label}`;
+    return `${formatElapsed(data.t[i])}：浸水深 ${formatDepth(data.depth[i])}・${personStatusMeta(st, who).label}`;
   };
 
-  const setData = (series: Series, dur: number, thInfos: ThresholdInfo[]) => {
+  const setData = (series: Series, dur: number, thInfos: ThresholdInfo[], person?: Pick<Person, 'evacMode'> | null) => {
     const ths = thInfos.map((th) => th.minDepth);
     data = series;
+    who = person ?? null;
     duration = dur;
     const hasData = series.count > 1;
     setHidden(root, !hasData);
@@ -657,22 +801,37 @@ function createDepthChart() {
       grid.append(svg('text', { x: X(t), y: H - 8, 'text-anchor': isLast && t > 0 ? 'end' : 'middle', dx: isLast && t > 0 ? 6 : 0 }, isLast && t > 0 ? `${Math.round(t / 60)}分` : `${Math.round(t / 60)}`));
     }
 
-    // 危険度の閾値
+    // 線と面（画面座標）
+    const px = new Float64Array(series.count);
+    const py = new Float64Array(series.count);
+    let d = '';
+    for (let i = 0; i < series.count; i++) {
+      px[i] = X(series.t[i]);
+      py[i] = Y(series.depth[i]);
+      d += `${i ? 'L' : 'M'}${px[i].toFixed(1)} ${py[i].toFixed(1)}`;
+    }
+
+    // 危険度の閾値（線は面の下、ラベルは線の上。ラベルは浸水深の線と重ならない側（右端か左端）に置く）
     thresholds.replaceChildren();
+    thLabels.replaceChildren();
     thInfos.forEach((th) => {
       const v = th.minDepth;
       if (v > yMax) return;
       const y = Y(v);
       const st: PersonStatus = th.status;
-      thresholds.append(
-        svg('line', { x1: M.l, x2: M.l + PW, y1: y, y2: y, style: `stroke:${statusMeta(st).color}` }),
-        svg('text', { x: M.l + PW - 2, y: y - 3, 'text-anchor': 'end', class: 'th-label' }, `${formatDepth(v)}〜 ${statusMeta(st).label}`),
+      const text = `${formatDepth(v)}〜 ${statusMeta(st).label}`;
+      const width = estimateTextWidth(text, 9.5) + 4;
+      const side = chooseLabelSide(px, py, series.count, { left: M.l, right: M.l + PW, top: y - 14, bottom: y - 1, width });
+      thresholds.append(svg('line', { x1: M.l, x2: M.l + PW, y1: y, y2: y, style: `stroke:${statusMeta(st).color}` }));
+      thLabels.append(
+        svg(
+          'text',
+          side === 'end' ? { x: M.l + PW - 2, y: y - 3, 'text-anchor': 'end', class: 'th-label' } : { x: M.l + 3, y: y - 3, 'text-anchor': 'start', class: 'th-label' },
+          text,
+        ),
       );
     });
 
-    // 線と面
-    let d = '';
-    for (let i = 0; i < series.count; i++) d += `${i ? 'L' : 'M'}${X(series.t[i]).toFixed(1)} ${Y(series.depth[i]).toFixed(1)}`;
     line.setAttribute('d', d);
     const last = series.count - 1;
     area.setAttribute('d', `${d}L${X(series.t[last]).toFixed(1)} ${Y(0)}L${X(series.t[0]).toFixed(1)} ${Y(0)}Z`);

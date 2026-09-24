@@ -15,6 +15,7 @@ import {
   OPENFREEMAP,
   RELIEF_EXTRA_CREDIT,
   RELIEF_TILES,
+  SIM_VS_OFFICIAL_NOTE,
   depthClassFromRgb,
   depthClassOf,
   depthToRgba,
@@ -210,6 +211,18 @@ describe('official wording (re-checked against the primary pages)', () => {
     expect(notes).toContain('5つの地震');
     expect(notes).toContain('河川内');
     expect(KANAGAWA_TSUNAMI_KEIKAI_URL.startsWith('https://www.pref.kanagawa.jp/')).toBe(true);
+  });
+
+  it('the official-layer notes say the simulation floods less and shallower even against the same 西側 quake (docs/MODEL.md 4.13.5)', () => {
+    // 5地震の重ね合わせだけが原因のように読めないこと: 西側モデル単独の予測図との比較でも recall 0.831（鵠沼 0.877）・浅い 0.408
+    const notes = HAZARD_TSUNAMI_TILES.notes ?? '';
+    expect(notes).toContain(SIM_VS_OFFICIAL_NOTE);
+    expect(SIM_VS_OFFICIAL_NOTE).toContain('狭く');
+    expect(SIM_VS_OFFICIAL_NOTE).toContain('浅め');
+    expect(SIM_VS_OFFICIAL_NOTE).toContain('同じ相模トラフ西側モデル');
+    expect(SIM_VS_OFFICIAL_NOTE).toContain('1〜2割');
+    expect(SIM_VS_OFFICIAL_NOTE).toContain('公式の想定の方が広く深い前提');
+    expect(SIM_VS_OFFICIAL_NOTE).not.toMatch(/ふつう|だけが原因/);
   });
 
   it('DEM tile ids and zoom limits match the GSI tile list', () => {

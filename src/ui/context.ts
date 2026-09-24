@@ -4,11 +4,15 @@
 import type { AppStore } from '../core/store';
 import type { AppActions } from '../core/controller';
 import type { AppState, SimOutput } from '../core/types';
+import { usableOutput } from '../core/results';
 import type { Scope } from './dom';
 import type { AddressBook } from './personAddress';
 import { summarizeArrays, type OutputSummary } from './series';
 
 export type TabId = 'quake' | 'people' | 'layers' | 'info';
+
+/** モバイル表示に切り替える幅（CSS の @media と同じ値） */
+export const MOBILE_QUERY = '(max-width: 819.98px)';
 
 export interface UIContext {
   store: AppStore;
@@ -46,7 +50,7 @@ export interface PlaceServices {
 
 /** 表示中のタイムラインの長さ [秒] */
 export function timelineDuration(s: AppState): number {
-  const out = s.sim.output;
+  const out = usableOutput(s);
   const d = out ? safeCall(() => out.durationSec, NaN) : NaN;
   return Number.isFinite(d) && d > 0 ? d : s.params.durationMin * 60;
 }
@@ -83,6 +87,7 @@ export function outputRevision(out: SimOutput | null): number | null {
 /**
  * 計算結果は計算中にも内部で増えていく（ストアには通知されない）ため、
  * 実行中は一定間隔で問い合わせて、集計値（最初の浸水・最大浸水深など）を更新する。
+ * 対象は表示に使える結果（今の地形の上の結果: core/results.ts の usableOutput）だけ。
  */
 export class OutputWatcher {
   snap: OutputSnapshot = { output: null, timeReady: 0, gaugeCount: 0, summary: null, version: 0, revision: null };
@@ -95,6 +100,7 @@ export class OutputWatcher {
     private intervalMs = 500,
   ) {
     scope.add(store.select((s) => s.sim.output, () => this.poll(true)));
+    scope.add(store.select((s) => s.terrain.grid, () => this.poll(true)));
     scope.add(
       store.select((s) => s.sim.status, () => {
         this.poll(true);
@@ -117,7 +123,7 @@ export class OutputWatcher {
 
   /** 最新の状態を問い合わせる（変化があれば通知） */
   poll(force = false): void {
-    const out = this.store.get().sim.output;
+    const out = usableOutput(this.store.get());
     if (!out) {
       if (this.snap.output !== null || force) this.emit({ output: null, timeReady: 0, gaugeCount: 0, summary: null, version: this.snap.version + 1, revision: null });
       return;

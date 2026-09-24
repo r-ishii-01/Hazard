@@ -506,6 +506,16 @@ details.scenario-notes ul {
   display: none;
 }
 
+.shelters-info-body {
+  min-width: 0;
+}
+
+/* 指定緊急避難場所データの利用上の注意・津波避難ビルが含まれないこと */
+.shelters-info-notice {
+  display: block;
+  margin-top: 2px;
+}
+
 /* ---- 結果 ------------------------------------------------------------------ */
 .results {
   background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
@@ -547,6 +557,46 @@ details.scenario-notes ul {
 .stat-sub {
   font-size: 11.5px;
   color: var(--text-3);
+}
+
+/* ---- 計算結果: 途中までの結果・条件の変更の知らせ ------------------------------- */
+/* 「0〜9分20秒のみ計算（中止）」のような長いタグは折り返す */
+.results .tag-running {
+  height: auto;
+  min-height: 20px;
+  padding-block: 2px;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+/* 中止・失敗で途中まで: 計算中（青）と区別して注意の色 */
+.results .tag-running[data-state="cancelled"],
+.results .tag-running[data-state="error"] {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  color: var(--warn);
+}
+
+.tag-stale {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  color: var(--warn);
+}
+
+.notice-body {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.notice-actions:not(:has(> :not([hidden]))) {
+  display: none;
 }
 
 /* ---- 実行ボタン（下部に固定） ------------------------------------------------ */
@@ -785,17 +835,29 @@ details.scenario-notes ul {
   display: inline-flex;
 }
 
+/*
+ * 状態の見方: 1 列目（状態のチップ）は、いちばん長いチップ（「歩行困難（危険）」など）に合わせる。
+ * 各行は subgrid で列をそろえる（以前は 116px 固定で、長いチップが説明文に重なっていた）。
+ */
 .status-legend {
   display: grid;
-  gap: 8px;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px var(--sp-2);
   list-style: none;
 }
 
 .status-legend li {
   display: grid;
-  grid-template-columns: 116px minmax(0, 1fr);
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: start;
-  gap: var(--sp-2);
+}
+
+@supports not (grid-template-columns: subgrid) {
+  .status-legend li {
+    grid-template-columns: 140px minmax(0, 1fr);
+    gap: var(--sp-2);
+  }
 }
 
 .status-legend .status-chip {
@@ -863,7 +925,7 @@ details.scenario-notes ul {
 
 .plan-dl {
   display: grid;
-  grid-template-columns: 7.5em minmax(0, 1fr);
+  grid-template-columns: 8.5em minmax(0, 1fr);
   gap: 6px var(--sp-3);
   font-size: 12.5px;
   line-height: 1.5;
@@ -902,6 +964,40 @@ details.scenario-notes ul {
 .plan-verdict[data-tone="danger"] {
   border-left-color: var(--danger);
   background: var(--danger-bg);
+}
+
+/* 避難の見通しの下の注意（公式の想定との関係・避難場所データの注意・出典） */
+.plan-notes {
+  display: grid;
+  gap: 4px;
+}
+
+.plan-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.plan-note > .icon {
+  flex: none;
+  margin-top: 3px;
+}
+
+.plan-note[hidden] {
+  display: none;
+}
+
+.plan-note-source {
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.plan-note .shelters-info-notice {
+  margin-top: 0;
 }
 
 .detail-actions {
@@ -952,13 +1048,14 @@ details.scenario-notes ul {
   stroke-dasharray: 4 3;
 }
 
-.chart-thresholds text {
+/* しきい値のラベルは線・面の上に描き、白い縁取りで読めるようにする（people.ts が線と重ならない側に置く） */
+.chart-th-labels text {
   font-size: 9.5px;
   font-weight: 700;
   fill: var(--text-2);
   paint-order: stroke;
   stroke: #fff;
-  stroke-width: 3px;
+  stroke-width: 3.5px;
   stroke-linejoin: round;
 }
 

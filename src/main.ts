@@ -13,7 +13,8 @@ const actions = createController(store);
 const root = document.getElementById('app')!;
 mountUI(root, store, actions);
 
-const view2d = new MapView2D(document.getElementById('view-2d')!, store, actions);
+const view2dEl = document.getElementById('view-2d')!;
+const view2d = new MapView2D(view2dEl, store, actions);
 
 // ---------------------------------------------------------------------------
 // 3D ビュー: three.js は大きいので、初めて 3D に切り替えた時に読み込む（コード分割）
@@ -84,10 +85,23 @@ function ensure3d(): void {
     });
 }
 
+/**
+ * 表示していない方のビュー（2D 地図・3D）をキーボード操作・支援技術の対象から外す。
+ * 非表示のビューは visibility: hidden だが、地図の部品（出典の開閉など）が visibility: visible を指定していると
+ * 見えないまま Tab キーのフォーカスが止まるため、inert にする。
+ */
+function setViewHidden(el: HTMLElement, hidden: boolean): void {
+  el.inert = hidden;
+  if (hidden) el.setAttribute('aria-hidden', 'true');
+  else el.removeAttribute('aria-hidden');
+}
+
 store.select(
   (s) => s.view,
   (view) => {
     document.body.dataset.view = view;
+    setViewHidden(view2dEl, view !== '2d');
+    setViewHidden(view3dEl, view !== '3d');
     view2d.setActive(view === '2d');
     if (view === '3d') ensure3d();
     view3d?.setActive(view === '3d');

@@ -1,23 +1,13 @@
 /**
  * 表示用の書式・色計算（純粋関数。DOM に依存しないので単体テストできる）。
+ * 経過時間・浸水深の書式は人物のモデルの説明文と共通（core/format.ts）。
  */
+export { formatDepth, formatElapsed, formatSpan } from '../core/format';
 
 const pad2 = (n: number) => (n < 10 ? `0${n}` : String(n));
 
 export function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
-}
-
-/** 経過時間（秒）→ 「12分30秒」「45秒」「1時間05分00秒」 */
-export function formatElapsed(sec: number): string {
-  if (!Number.isFinite(sec)) return '—';
-  const total = Math.max(0, Math.floor(sec + 1e-6));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h > 0) return `${h}時間${pad2(m)}分${pad2(s)}秒`;
-  if (m > 0) return `${m}分${pad2(s)}秒`;
-  return `${s}秒`;
 }
 
 /** 経過時間（秒）→ 「12:30」（分は60以上もそのまま） */
@@ -50,13 +40,6 @@ export function formatSigned(v: number, digits = 1): string {
 export function formatTP(m: number, digits = 1): string {
   if (!Number.isFinite(m)) return '—';
   return `T.P.${formatSigned(m, digits)} m`;
-}
-
-/** 浸水深 [m] → 「0.35 m」「2.4 m」 */
-export function formatDepth(m: number): string {
-  if (!Number.isFinite(m)) return '—';
-  const v = Math.max(0, m);
-  return `${v < 1 ? v.toFixed(2) : v.toFixed(1)} m`;
 }
 
 /** 距離 [m] → 「850 m」「1.2 km」 */

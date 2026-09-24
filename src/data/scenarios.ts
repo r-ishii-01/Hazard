@@ -159,6 +159,12 @@ export interface ScenarioInfo extends QuakeScenario {
   shindoRange?: string;
   /** 到達時間 arrivalMin の根拠（公式のどの値をどう使ったか） */
   arrivalBasis?: string;
+  /**
+   * arrivalMin が公的資料の「最大津波到達時間」（最大の波が来る時刻）そのものなら true。
+   * 南海トラフ（内閣府は最大波の時刻を公表していないため +3m の到達時刻を代用した本サイトの設定）と説明用の例は false。
+   * 画面で「想定」（公的な値）と「設定」（本サイトが決めた値）を書き分けるときは arrivalIsOfficialMax() を使う。
+   */
+  arrivalOfficialMax?: boolean;
   /** 気象庁の定義による「津波の高さ」（平常潮位からの高さ）[m]。説明用の例で使う */
   jmaHeightM?: number;
   /** 設定値（仮定）の一覧（画面表示用の短い文） */
@@ -330,7 +336,7 @@ export const SCENARIO_NOTES: string[] = [
   // [K-解説] p.10、[内閣府2012] 津波断層モデル編 PDF p.16
   '初期潮位は、神奈川県の想定では朔望平均満潮位 T.P.+0.85m（大潮の満潮ごろ）です。内閣府の南海トラフの想定は、各地の年間最高潮位を参考にした満潮位を使っています。このサイトでは比べやすいよう、どのシナリオも T.P.+0.85m から計算します。',
   // [K-解説] p.14 表1 の注記、[内閣府2012] 津波断層モデル編 PDF p.23、気象庁「津波警報・注意報と避難のポイント」
-  '到達時間は原則として公的資料の「最大津波到達時間」（最大の波が来る時刻）です（南海トラフは内閣府の津波高+3m到達時刻、遠地津波の例は短縮した値。各シナリオの説明を参照）。実際にはそれより前に小さな波が来ることがあります。このモデルでは最大の波をこの時刻に合わせ、公的な想定のシナリオでは後の波を最大の波の0.4〜0.5倍で繰り返しています（慶長型・明応型は最大の波の約20分前に小さな第1波も入れています）。実際には後の波の方が高いこともあり、津波は数時間以上くり返し来ます。',
+  '到達時間は原則として公的資料の「最大津波到達時間」（最大の波が来る時刻）です（南海トラフは内閣府が最大波の時刻を示していないため津波高+3mの到達時刻を使った設定、説明用の例は設定値。各シナリオの説明を参照）。レイヤーの「津波到達時間」は各地点に最初に浸水した時刻で、これとは別の値です。実際には最大の波より前に小さな波が来ることがあります。このモデルでは最大の波をこの時刻に合わせ、公的な想定のシナリオでは後の波を最大の波の0.4〜0.5倍で繰り返しています（慶長型・明応型は最大の波の約20分前に小さな第1波も入れています）。実際には後の波の方が高いこともあり、津波は数時間以上くり返し来ます。',
   // 周期・後続波の大きさの根拠: 下の「周期・波形の設定根拠」、docs/MODEL.md「波の周期・波形の設定根拠と感度分析」
   '周期・波の数・後の波の大きさ・揺れの長さ、および一部のシナリオの第1波の向き（押し波か引き波か）は、公的資料に値が無いための設定値（仮定）です。公的な想定のシナリオの周期と後の波の大きさは、神奈川県の計算波形（水位変動図）に近くなるよう選んでいます。',
 ];
@@ -435,6 +441,7 @@ export const SCENARIOS: ScenarioInfo[] = [
     source: '神奈川県「津波浸水予測図」相模トラフ沿いの海溝型地震（西側モデル）（平成27年）ほか',
     sourceUrl: 'https://www.pref.kanagawa.jp/docs/f4i/cnt/f532320/p892754.html',
     arrivalBasis: '県の予測図の藤沢海岸「最大津波到達時間」8分（最大の波が来る時刻）',
+    arrivalOfficialMax: true,
     assumptions: [ASSUME_SAGAMI_PERIOD, ASSUME_SAGAMI_WAVES, '揺れ120秒（演出用の仮定）'],
     refs: [
       { label: '同 予測図 17/24（作図範囲: 鎌倉市・藤沢市）', url: 'https://www.pref.kanagawa.jp/uploaded/attachment/760437.pdf' },
@@ -446,7 +453,11 @@ export const SCENARIOS: ScenarioInfo[] = [
       '神奈川県の津波浸水想定（平成27年）で、藤沢市の最大津波高さが最も高くなる地震（Mw8.7、発生間隔は2千〜3千年あるいはそれ以上）。' +
       '鵠沼海岸を含む「藤沢海岸」（茅ヶ崎市境〜片瀬漁港西側）の最大津波高さ T.P.+8.8m・最大津波到達時間8分（県の予測図）を目標にしています。' +
       // [K-解説] p.14 表1（11.5m・12分、注: がけ地等を含めると江の島で11.6m）、[F-概要]（第1波6分、40分後ごろまで、20分以降2m前後）
+      // このモデルの後の波: 既定の条件（解像度「標準」・90分）で鵠沼海岸沖の潮位計の最大は、20〜40分 T.P.+5.8m（28.8分）、
+      // 45〜90分 T.P.+5.1m（2026-09-24 に Node で prepareRun を実行して確認。粗い格子でも 5.7m・5.3m）。
+      // 後の波を境界で最大の波の0.4倍としたのは [K-解説] の水位変動図の後の山（0.3〜0.6倍）による（上の「周期・波形の設定根拠」）
       '市内の海岸（海岸保全区域・港湾・漁港）での最大は湘南港海岸（江の島）の11.5m・12分（がけ地等を含めると江の島で11.6m）。藤沢市の資料では第1波の到達は6分、40分後ごろまで繰り返し押し寄せ、20分以降は2m前後とされています。' +
+      'このモデルの後の波は、県の計算波形（後の山は最大の波の0.3〜0.6倍）を参考にした設定のため、鵠沼海岸沖の水位は20分以降も T.P.+5〜6m 程度（潮位から約4〜5m）になり、藤沢市の資料の値より高めです。' +
       '震度は藤沢市の資料で「神奈川県全県域で震度7」（県の令和7年被害想定では藤沢市6強〜7）。' +
       '8分に最大の波が来るよう設定しています。周期20分・6波（第2波以降は最大の波の0.4倍）は県の計算波形を参考にした設定値（仮定）、揺れ120秒は演出用の仮定です。',
   },
@@ -476,6 +487,7 @@ export const SCENARIOS: ScenarioInfo[] = [
     source: '神奈川県「津波浸水予測図」相模トラフ沿いの海溝型地震（中央モデル）（平成27年）',
     sourceUrl: 'https://www.pref.kanagawa.jp/docs/f4i/cnt/f532320/p892753.html',
     arrivalBasis: '県の予測図の藤沢海岸「最大津波到達時間」23分',
+    arrivalOfficialMax: true,
     assumptions: [
       ASSUME_SAGAMI_PERIOD,
       ASSUME_SAGAMI_WAVES,
@@ -520,6 +532,7 @@ export const SCENARIOS: ScenarioInfo[] = [
     source: '神奈川県「津波浸水予測図」元禄関東地震タイプ（平成27年）',
     sourceUrl: 'https://www.pref.kanagawa.jp/docs/f4i/cnt/f532320/p892750.html',
     arrivalBasis: '県の予測図の藤沢海岸「最大津波到達時間」9分',
+    arrivalOfficialMax: true,
     assumptions: [
       ASSUME_SAGAMI_PERIOD,
       ASSUME_SAGAMI_WAVES,
@@ -567,6 +580,7 @@ export const SCENARIOS: ScenarioInfo[] = [
     source: '神奈川県「津波浸水予測図」大正関東地震タイプ（平成27年）／萬年ほか（2013）歴史地震28号',
     sourceUrl: 'https://www.pref.kanagawa.jp/docs/f4i/cnt/f532320/p892751.html',
     arrivalBasis: '県の予測図の藤沢海岸「最大津波到達時間」9分',
+    arrivalOfficialMax: true,
     assumptions: [
       ASSUME_SAGAMI_PERIOD,
       // [萬年2013] §4.4 が紹介する梶浦（1986）、[K-予測図] 大正 17/24、[蟹江2019]
@@ -612,6 +626,7 @@ export const SCENARIOS: ScenarioInfo[] = [
     source: '神奈川県「津波浸水予測図」慶長型地震（平成27年）',
     sourceUrl: 'https://www.pref.kanagawa.jp/docs/f4i/cnt/f532320/p892748.html',
     arrivalBasis: '県の予測図の藤沢海岸「最大津波到達時間」50分。それより前の波の時刻は公表資料に無い',
+    arrivalOfficialMax: true,
     assumptions: ['震度5強（仮置き。公的な震度推計なし）', ASSUME_KEICHO_PERIOD, ASSUME_KEICHO_WAVES, '揺れ90秒（演出用の仮定）', '第1波は押し波から（仮定）'],
     refs: [
       { label: '同 予測図 17/24（作図範囲: 鎌倉市・藤沢市）', url: 'https://www.pref.kanagawa.jp/uploaded/attachment/760101.pdf' },
@@ -647,6 +662,7 @@ export const SCENARIOS: ScenarioInfo[] = [
     source: '神奈川県「津波浸水予測図」明応型地震（平成27年）',
     sourceUrl: 'https://www.pref.kanagawa.jp/docs/f4i/cnt/f532320/p892747.html',
     arrivalBasis: '県の予測図の藤沢海岸「最大津波到達時間」50分。それより前の波の時刻は公表資料に無い',
+    arrivalOfficialMax: true,
     assumptions: [
       '震度5強（仮置き。公的な震度推計なし）',
       ASSUME_FAR_PERIOD,
@@ -942,6 +958,16 @@ export const SHINDO_PRESETS: Record<ShindoLevel, { scenarioId: string; note: str
 
 export function getScenario(id: string): ScenarioInfo | undefined {
   return SCENARIOS.find((s) => s.id === id);
+}
+
+/**
+ * シナリオの到達時間が、公的資料の「最大津波到達時間」（最大の波の時刻）そのものか。
+ * false のもの（南海トラフの 34 分＝内閣府の +3m 到達時刻の代用、説明用の例）は、
+ * 「最大波の到達（想定）」ではなく「（設定）」と表示するのが正確（docs/MODEL.md 4.10）。
+ * 利用者が到達時間を変更した場合は、どちらでも公的な値ではなくなる（画面側で扱う）。
+ */
+export function arrivalIsOfficialMax(sc: Pick<ScenarioInfo, 'isOfficial'> & { arrivalOfficialMax?: boolean }): boolean {
+  return sc.isOfficial === true && sc.arrivalOfficialMax === true;
 }
 
 /**

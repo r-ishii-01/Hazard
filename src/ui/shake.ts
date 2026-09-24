@@ -2,10 +2,12 @@
  * 揺れの演出: 再生中で 0 ≤ t < shakingSec の間、2D/3D ビューを CSS の transform で揺らす。
  *
  * - 振幅は INTENSITY_INFO[震度].shake（0〜1）× 最大 14 px。終わりに向けて減衰させる。
+ * - 震度・揺れの長さは表示中の結果の条件（core/results.ts の resultShindo / resultParams）。
  * - 振動は実時間（performance.now）で作る。再生速度を上げても不自然に速くならない。
  * - prefers-reduced-motion のときは揺らさない（HUD の「強い揺れ」表示のみ）。
  * - 演出であり、実際の揺れ方の再現ではない。
  */
+import { resultParams, resultShindo } from '../core/results';
 import { INTENSITY_INFO } from '../data/intensity';
 import type { UIContext } from './context';
 import { clamp } from './format';
@@ -39,9 +41,10 @@ export function mountShake(ctx: UIContext, stage: HTMLElement): void {
 
   const apply = () => {
     const s = store.get();
-    const dur = s.params.scenario.shakingSec;
+    // 表示中の結果の条件で（震度を選び直しても、再計算するまでは HUD の「揺れ」の表示と同じ震度）
+    const dur = resultParams(s).scenario.shakingSec;
     const t = s.time.t;
-    const strength = clamp(INTENSITY_INFO[s.shindo]?.shake ?? 0, 0, 1);
+    const strength = clamp(INTENSITY_INFO[resultShindo(s)]?.shake ?? 0, 0, 1);
     const on = s.time.playing && t >= 0 && t < dur && strength > 0 && !reduce.matches && !document.hidden;
     const amp = on ? MAX_SHAKE_PX * strength * shakeEnvelope(t / dur) : 0;
     if (amp < 0.05) {

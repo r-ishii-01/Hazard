@@ -4,7 +4,7 @@
  * スマートフォン幅では、検索パネルが画面に収まることと、地図の上の表示（HUD）がコンパクトなことを確かめる。
  */
 import type { Page } from '@playwright/test';
-import { SEARCH_ERROR_QUERY, describeProblems, expect, openReadyApp, test } from './fixtures';
+import { SEARCH_ERROR_QUERY, describeProblems, expect, openReadyApp, test, waitForTerrain } from './fixtures';
 
 /** 2D 地図のスタイルの読み込みを待つ */
 async function waitForMap(page: Page): Promise<void> {
@@ -183,6 +183,11 @@ test.describe('スマートフォン幅', () => {
   test('地図の上の表示（HUD）はコンパクトで、検索パネルが画面に収まる', async ({ page, consoleProblems }) => {
     await openReadyApp(page);
     await waitForMap(page);
+    // 自動計算を途中で中止した結果が残っていると、計算済みの時刻より先へは移動できない。
+    // 地形を読み込み直して結果を消し、決まった状態（結果なし）から始める
+    await page.evaluate(() => window.__app.actions.reloadTerrain());
+    await waitForTerrain(page);
+    expect(await page.evaluate(() => window.__app.store.get().sim.output)).toBeNull();
 
     // 警報が出る時刻（気象庁の発表目標の約3分より後）へ
     await page.evaluate(() => window.__app.actions.seek(600));

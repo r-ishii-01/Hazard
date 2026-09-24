@@ -7,6 +7,7 @@
  */
 import { CELL_LAND, CELL_SEA, type Shelter, type SimOutput, type TerrainGrid } from '../core/types';
 import { lonLatToCell } from '../core/geo';
+import { outputComplete as coreOutputComplete } from '../core/results';
 
 /** 通行可否: 陸（歩ける） */
 export const PASS_LAND = 0;
@@ -23,6 +24,12 @@ export const MAX_WATER_CROSSING_M = 50;
 
 /** シミュレーション結果から「安全」とするセルが、海・浸水したセルから離れているべき距離 [m]（仮定） */
 export const SAFE_BUFFER_M = 30;
+
+/**
+ * 最寄りの高台の候補が、公式の津波浸水想定の区域から離れているべき距離 [m]（仮定。SAFE_BUFFER_M と同じ 30 m）。
+ * 公式のタイル（z15、1画素 ≒ 3.9 m）と計算セル（約 8〜31 m）の位置の誤差と、区域の縁の不確かさの余裕。
+ */
+export const OFFICIAL_ZONE_BUFFER_M = SAFE_BUFFER_M;
 
 /** シミュレーション結果がない場合、高台とみなす標高の余裕 [m]（海岸での津波高 + この値以上。仮定） */
 export const HIGHGROUND_MARGIN_M = 1;
@@ -63,7 +70,7 @@ export interface GridContext {
   /** 連結成分ごとのセル数 */
   compSize: Int32Array;
   heightSafe: Map<number, Uint8Array>;
-  simSafe: WeakMap<SimOutput, { frames: number; mask: Uint8Array; combined: Map<number, Uint8Array> }>;
+  simSafe: WeakMap<SimOutput, { key: string; mask: Uint8Array; combined: Map<number, Uint8Array> }>;
   shelterTargets: WeakMap<Shelter[], ShelterTargets>;
   nearestLandCache: Map<string, number>;
 }
@@ -301,15 +308,24 @@ export function outputMatchesGrid(ctx: GridContext, output: SimOutput): boolean 
   return a.nx === b.nx && a.ny === b.ny && a.originPx === b.originPx && a.originPy === b.originPy && a.cellPx === b.cellPx;
 }
 
-/** 計算が最後まで終わっているか */
+/** 計算が最後まで終わっているか（判定は画面の表示と共通: core/results.ts） */
 export function outputComplete(output: SimOutput): boolean {
-  return output.framesReady() > 0 && output.timeReady() >= output.durationSec - 1e-6;
+  return coreOutputComplete(output);
+}
+
+/**
+ * キャッシュの鍵: フレーム数と更新番号（sim の実装が持つ revision）。
+ * 最大浸水深・到達時刻の配列は同じオブジェクトが書き換わる（計算中の集計、中止後の仕上げ）ので、フレーム数だけでは足りない。
+ */
+function outputKey(output: SimOutput): string {
+  const r = (output as { revision?: unknown }).revision;
+  return `${output.framesReady()}|${typeof r === 'number' ? r : ''}|${outputComplete(output) ? 1 : 0}`;
 }
 
 function simEntry(ctx: GridContext, output: SimOutput) {
-  const frames = output.framesReady();
+  const key = outputKey(output);
   const cached = ctx.simSafe.get(output);
-  if (cached && cached.frames === frames) return cached;
+  if (cached && cached.key === key) return cached;
   const { nx, ny, n } = ctx;
   const kind = ctx.grid.kind;
   const { maxDepth, arrival } = output;
@@ -324,7 +340,7 @@ function simEntry(ctx: GridContext, output: SimOutput) {
   const z = ctx.grid.z;
   // 標高が欠損（NaN）のセルは目標にしない（表示する標高が分からないため）
   for (let k = 0; k < n; k++) mask[k] = ctx.pass[k] === PASS_LAND && !near[k] && Number.isFinite(z[k]) ? 1 : 0;
-  const entry = { frames, mask, combined: new Map<number, Uint8Array>() };
+  const entry = { key, mask, combined: new Map<number, Uint8Array>() };
   ctx.simSafe.set(output, entry);
   return entry;
 }
@@ -349,6 +365,58 @@ export function simAndHeightSafeMask(ctx: GridContext, output: SimOutput, thresh
     entry.combined.set(key, mask);
   }
   return mask;
+}
+
+// ---------------------------------------------------------------------------
+// 公式の津波浸水想定の区域を除く
+// ---------------------------------------------------------------------------
+
+/** セルの階級コード（data/officialHazard.ts の officialCellCodes）→ 区域（と周囲 OFFICIAL_ZONE_BUFFER_M）のセル */
+const officialNearCache = new WeakMap<Uint8Array, Map<number, Uint8Array>>();
+/** 目標マスク → セルの階級コード → 区域を除いたマスク */
+const officialExcludedCache = new WeakMap<Uint8Array, WeakMap<Uint8Array, Uint8Array>>();
+
+/**
+ * 公式の津波浸水想定の区域と、その周囲 OFFICIAL_ZONE_BUFFER_M 以内のセル（1）。
+ * 階級が不明なセル（公式のタイルを取得できなかった範囲）も区域として扱う（確かめられない場所を安全な場所として示さない）。
+ * cellCodes はこの格子（ctx.grid.spec）のセルごとのコード（0 = 区域外、1〜8 = 階級、255 = 不明）。
+ */
+export function officialZoneNear(ctx: GridContext, cellCodes: Uint8Array): Uint8Array {
+  if (cellCodes.length !== ctx.n) throw new Error('公式の浸水想定のセルの数が格子と合いません');
+  const r = Math.max(1, Math.ceil(OFFICIAL_ZONE_BUFFER_M / ctx.dx));
+  let byR = officialNearCache.get(cellCodes);
+  if (!byR) {
+    byR = new Map();
+    officialNearCache.set(cellCodes, byR);
+  }
+  let near = byR.get(r);
+  if (!near) {
+    const zone = new Uint8Array(ctx.n);
+    for (let k = 0; k < ctx.n; k++) zone[k] = cellCodes[k] !== 0 ? 1 : 0;
+    near = dilate(zone, ctx.nx, ctx.ny, r);
+    byR.set(r, near);
+  }
+  return near;
+}
+
+/**
+ * 目標マスクから、公式の津波浸水想定の区域（と周囲）のセルを除いたマスク（入力は変更しない。結果はキャッシュ）。
+ * 「最寄りの高台」を、このサイトの計算だけでなく公式の想定でも浸水しない場所に限るために使う。
+ */
+export function excludeOfficialZone(ctx: GridContext, mask: Uint8Array, cellCodes: Uint8Array): Uint8Array {
+  let byCodes = officialExcludedCache.get(mask);
+  if (!byCodes) {
+    byCodes = new WeakMap();
+    officialExcludedCache.set(mask, byCodes);
+  }
+  let out = byCodes.get(cellCodes);
+  if (!out) {
+    const near = officialZoneNear(ctx, cellCodes);
+    out = new Uint8Array(ctx.n);
+    for (let k = 0; k < ctx.n; k++) out[k] = mask[k] && !near[k] ? 1 : 0;
+    byCodes.set(cellCodes, out);
+  }
+  return out;
 }
 
 /** 二値画像のチェビシェフ距離 r の膨張（行方向→列方向の分離型、スライディング和で O(n)） */

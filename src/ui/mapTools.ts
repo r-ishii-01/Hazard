@@ -5,7 +5,9 @@
  *   （↑↓ で候補を選び Enter で決定、Esc で閉じる）。計算範囲の中の候補を先に、外は「計算範囲外」と示す。
  *   選ぶと地図をその場所へ移し（2D は一時的な目印を出す）、計算範囲の中なら「ここに人物を置く」を出す。
  * - 現在地（Geolocation API）: ボタンを押したときだけ 1 回取得する。座標はこの端末の中だけで使い、外部に送らない
- *   （住所も調べない）。計算範囲の中なら「ここに人物を置く」、外ならその旨を説明して計算範囲を表示する。
+ *   （住所も調べない）。計算範囲の中なら地図を現在地へ移して「ここに人物を置く」、外ならその旨を説明して計算範囲を表示する。
+ *   地図を移すとその周辺の地図画像を配信元から読み込むので、おおよその場所は配信元に伝わる（画面にもそう書く: GEO_TILE_NOTE）。
+ * - 狭い画面で人物を置いたら、パネルを閉じて地図の人物を見せ、下に短い知らせ（人物タブを開くボタン付き）を出す。
  *
  * 外部から来た文字列（検索結果の名称など）は、すべて textContent（h() の子の文字列）で入れる。innerHTML は使わない。
  */
@@ -27,6 +29,7 @@ import {
   MIN_QUERY_LENGTH,
   describeResult,
   formatApproxDistance,
+  isTimeoutError,
   normalizeQuery,
   outsideBadge,
   placementProblem,
@@ -34,8 +37,9 @@ import {
   searchPlaces,
   type PlaceResult,
 } from './geoSearch';
-import { GEO_PRIVACY_TEXT, GeoError, describeAccuracy, geoErrorMessage, isLowAccuracy, locationDistanceToDomain, requestPosition } from './geolocate';
+import { GEO_PRIVACY_TEXT, GEO_TILE_NOTE, GeoError, describeAccuracy, geoErrorMessage, isLowAccuracy, locationDistanceToDomain, requestPosition } from './geolocate';
 import { icon } from './icons';
+import { isCoarsePointer, tapVerb } from './pointer';
 
 export interface MapTools {
   openSearch(): void;
@@ -49,6 +53,8 @@ const DEBOUNCE_MS = 350;
 export const FOCUS_ZOOM = 16;
 /** 現在地から置いた人物の名前 */
 export const GEO_PERSON_NAME = '現在地の人';
+/** 狭い画面で人物を置いたときの知らせを出しておく時間 [ms] */
+const PLACED_TOAST_MS = 8000;
 
 const KINDS = Object.keys(PERSON_PROFILES) as PersonKind[];
 
@@ -80,7 +86,7 @@ export function mountMapTools(hud: HTMLElement, ctx: UIContext): MapTools {
       type: 'button',
       class: 'maptool-btn',
       'aria-label': '現在地',
-      title: '現在地（この端末内だけで使います）',
+      title: '現在地（座標は外部に送信しません）',
       'aria-expanded': 'false',
       'aria-controls': 'place-panel',
       dataset: { tool: 'locate' },
@@ -109,10 +115,49 @@ export function mountMapTools(hud: HTMLElement, ctx: UIContext): MapTools {
     }
   });
 
+  // 狭い画面で人物を置いた後の短い知らせ（HUD の下中央の状態表示の列に入れる。地図の人物を隠さない）
+  const toastText = h('span', { class: 'hud-chip-text' });
+  const toast = h(
+    'div',
+    { class: 'hud-chip hud-toast', role: 'status', hidden: true },
+    icon('check', 16),
+    toastText,
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'hud-chip-btn',
+        onclick: () => {
+          hideToast();
+          ctx.showPanel('people');
+        },
+      },
+      '人物タブを開く',
+    ),
+    h('button', { type: 'button', class: 'hud-chip-btn hud-chip-close', 'aria-label': '知らせを閉じる', onclick: () => hideToast() }, icon('close', 14)),
+  );
+  let toastTimer = 0;
+  const hideToast = () => {
+    window.clearTimeout(toastTimer);
+    toastTimer = 0;
+    setHidden(toast, true);
+  };
+  const showToast = (text: string) => {
+    setText(toastText, text);
+    setHidden(toast, false);
+    window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(hideToast, PLACED_TOAST_MS);
+  };
+  const bottomStack = hud.querySelector<HTMLElement>('.hud-bc');
+  if (bottomStack) bottomStack.prepend(toast);
+  else hud.append(toast);
+
   hud.append(tools, panel);
   ctx.scope.add(() => {
+    hideToast();
     tools.remove();
     panel.remove();
+    toast.remove();
   });
 
   // ---- 共通 -----------------------------------------------------------------------
@@ -179,7 +224,7 @@ export function mountMapTools(hud: HTMLElement, ctx: UIContext): MapTools {
             if (problem === 'sea') {
               actions.startPlacing(kind);
               ctx.collapseSheet();
-              onProblem('この地点は計算上は海・川なので、そのままは置けません。近くの陸地を地図上でクリック（タップ）して置いてください。');
+              onProblem(`この地点は計算上は海・川なので、そのままは置けません。近くの陸地を地図上で${tapVerb(isCoarsePointer())}して置いてください。`);
               // 狭い画面ではパネルが地図の上部を覆うので閉じる（地図の上に配置の案内が出る）
               if (ctx.isMobile()) close();
               return;
@@ -192,6 +237,15 @@ export function mountMapTools(hud: HTMLElement, ctx: UIContext): MapTools {
               actions.updatePerson(person.id, { name });
             }
             actions.startPlacing(null);
+            if (ctx.isMobile()) {
+              // 狭い画面ではパネルが地図の上半分以上を覆い、置いた人物が隠れる。パネルを閉じて人物を地図の中央に見せ、
+              // 下に短い知らせを出す（人物タブはボタンで開ける）
+              close();
+              actions.focusOn(lon, lat);
+              ctx.announce(`${name}を置きました`);
+              showToast(`「${name}」を置きました`);
+              return;
+            }
             onPlaced(name);
           },
         },
@@ -202,18 +256,12 @@ export function mountMapTools(hud: HTMLElement, ctx: UIContext): MapTools {
     return h('div', { class: 'kind-chips', role: 'group', 'aria-label': label }, h('span', { class: 'kind-chips-label' }, label), h('div', { class: 'kind-chips-row' }, chips));
   };
 
-  /** 人物を置いた後の案内 */
+  /** 人物を置いた後の案内（広い画面。狭い画面ではパネルを閉じて知らせを出す: kindChips） */
   const placedNote = (name: string) => {
     const msg = `「${name}」を置きました。避難の見通しと、その場所の浸水の深さは「人物」タブで確かめられます。`;
     ctx.announce(`${name}を置きました`);
-    if (!ctx.isMobile()) ctx.showPanel('people');
-    return h(
-      'div',
-      { class: 'place-placed', role: 'status' },
-      icon('check', 16),
-      h('span', null, msg),
-      ctx.isMobile() ? h('button', { type: 'button', class: 'btn btn-secondary btn-sm', onclick: () => ctx.showPanel('people') }, '人物タブを開く') : null,
-    );
+    ctx.showPanel('people');
+    return h('div', { class: 'place-placed', role: 'status' }, icon('check', 16), h('span', null, msg));
   };
 
   // ===========================================================================
@@ -376,7 +424,13 @@ export function mountMapTools(hud: HTMLElement, ctx: UIContext): MapTools {
           results = [];
           renderResults();
           lastQuery = '';
-          setStatus('error', '検索できませんでした。通信状態を確かめて、もう一度お試しください。');
+          // 応答が無いまま止まった場合も打ち切って（geoSearch.ts の GSI_REQUEST_TIMEOUT_MS）、再試行できるようにする
+          setStatus(
+            'error',
+            isTimeoutError(e)
+              ? '検索できませんでした（地名検索の応答がありません）。時間をおいて、もう一度お試しください。'
+              : '検索できませんでした。通信状態を確かめて、もう一度お試しください。',
+          );
         })
         .finally(() => {
           if (ac === my) ac = null;
@@ -483,7 +537,7 @@ export function mountMapTools(hud: HTMLElement, ctx: UIContext): MapTools {
         setText(
           note,
           problem === 'sea'
-            ? '計算範囲の中ですが、この地点は計算上は海・川です。種類を選ぶと、近くの陸地をクリックして置けます。'
+            ? `計算範囲の中ですが、この地点は計算上は海・川です。種類を選ぶと、近くの陸地を${tapVerb(isCoarsePointer())}して置けます。`
             : '計算範囲の中です。地震発生時にここにいた人を置いて、避難の見通しと浸水の深さを確かめられます。',
         );
         const placedBox = h('div', { class: 'place-placed-box' });
@@ -550,7 +604,7 @@ export function mountMapTools(hud: HTMLElement, ctx: UIContext): MapTools {
       'div',
       null,
       h('p', { class: 'place-privacy-main' }, GEO_PRIVACY_TEXT),
-      h('p', { class: 'place-privacy-sub' }, '住所も調べず、保存もしません。なお、地図を動かすとその範囲の背景地図の画像は通常どおり配信元から読み込みます。'),
+      h('p', { class: 'place-privacy-sub' }, `住所も調べず、保存もしません。${GEO_TILE_NOTE}`),
     ),
   );
   locView.append(locStatus, locBody, privacy);
@@ -623,7 +677,11 @@ export function mountMapTools(hud: HTMLElement, ctx: UIContext): MapTools {
       const placedBox = h('div', { class: 'place-placed-box' });
       const sea = problemAt(loc.lon, loc.lat) === 'sea';
       parts.push(
-        h('p', { class: 'place-note', dataset: { tone: sea ? 'warn' : 'ok' } }, sea ? 'この地点は計算上は海・川です。種類を選ぶと、近くの陸地をクリックして置けます。' : '「今ここにいたら、津波のときどうなるか」を、人物を置いて確かめられます。'),
+        h(
+          'p',
+          { class: 'place-note', dataset: { tone: sea ? 'warn' : 'ok' } },
+          sea ? `この地点は計算上は海・川です。種類を選ぶと、近くの陸地を${tapVerb(isCoarsePointer())}して置けます。` : '「今ここにいたら、津波のときどうなるか」を、人物を置いて確かめられます。',
+        ),
         kindChips(
           sea ? '近くに人物を置く' : 'ここに人物を置く',
           loc.lon,
@@ -654,7 +712,7 @@ export function mountMapTools(hud: HTMLElement, ctx: UIContext): MapTools {
         h(
           'p',
           { class: 'place-note', dataset: { tone: 'warn' } },
-          'このサイトは鵠沼海岸周辺（辻堂〜鵠沼〜片瀬・江の島）の破線の枠の中だけを計算します。地図を計算範囲に戻しました。枠の中の場所は、地名・住所の検索か、地図のクリックで選べます。',
+          `このサイトは鵠沼海岸周辺（辻堂〜鵠沼〜片瀬・江の島）の破線の枠の中だけを計算します。地図を計算範囲に戻しました。枠の中の場所は、地名・住所の検索か、地図の${tapVerb(isCoarsePointer())}で選べます。`,
         ),
         h(
           'div',

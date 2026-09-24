@@ -9,6 +9,7 @@ import {
   SCENARIO_NOTES,
   SCENARIOS,
   SHINDO_PRESETS,
+  arrivalIsOfficialMax,
   defaultDurationMin,
   defaultParams,
   getScenario,
@@ -369,6 +370,28 @@ describe('fact-check: scenario wording', () => {
     const d = getScenario('sagami-west')!.description;
     expect(d).toContain('11.5m・12分');
     expect(d).toContain('11.6m');
+  });
+
+  it('西側: quotes 藤沢市「20分以降は2m前後」and says the model’s later waves are higher (T.P.+5〜6m at the 鵠沼 gauge)', () => {
+    // [F-概要]「20 分後以降は、高さ2m 前後の津波である」。このモデルの潮位計（鵠沼海岸沖）は 20〜40分 T.P.+5.8m・45〜90分 T.P.+5.1m
+    const d = getScenario('sagami-west')!.description;
+    expect(d).toContain('20分以降は2m前後');
+    expect(d).toContain('T.P.+5〜6m');
+    expect(d).toContain('藤沢市の資料の値より高め');
+  });
+
+  it('到達時間が公的資料の最大津波到達時間そのものかを区別できる（南海トラフの34分・説明用の例は設定）', () => {
+    for (const s of SCENARIOS) {
+      const kanagawa = s.isOfficial && (s.arrivalBasis ?? '').includes('「最大津波到達時間」');
+      expect(arrivalIsOfficialMax(s), s.id).toBe(kanagawa);
+    }
+    expect(arrivalIsOfficialMax(getScenario('sagami-west')!)).toBe(true);
+    expect(arrivalIsOfficialMax(getScenario('keicho')!)).toBe(true);
+    expect(arrivalIsOfficialMax(getScenario('nankai')!)).toBe(false);
+    expect(getScenario('nankai')!.arrivalBasis).toContain('最大波の時刻を公表していない');
+    expect(SCENARIOS.filter((s) => !s.isOfficial).every((s) => !arrivalIsOfficialMax(s))).toBe(true);
+    // レイヤーの「津波到達時間」（浸水開始時刻）とは別の値であることを共通の注意で説明している
+    expect(SCENARIO_NOTES.join('')).toContain('レイヤーの「津波到達時間」は各地点に最初に浸水した時刻で、これとは別の値です');
   });
 
   it('far-field example uses the JMA monthly-report name and does not claim an unverified 3 m forecast', () => {

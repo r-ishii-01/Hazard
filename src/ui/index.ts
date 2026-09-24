@@ -6,7 +6,7 @@
  */
 import type { AppStore } from '../core/store';
 import type { AppActions } from '../core/controller';
-import { OutputWatcher, type PlaceServices, type TabId, type UIContext } from './context';
+import { MOBILE_QUERY, OutputWatcher, type PlaceServices, type TabId, type UIContext } from './context';
 import { createDisclaimer } from './disclaimer';
 import { Scope, h } from './dom';
 import { mountHeader } from './header';
@@ -18,8 +18,7 @@ import { mountShake } from './shake';
 import { mountSidebar, type TabBridge } from './sidebar';
 import { mountTimeline } from './timeline';
 
-/** モバイル表示に切り替える幅（CSS の @media と同じ値） */
-export const MOBILE_QUERY = '(max-width: 819.98px)';
+export { MOBILE_QUERY };
 
 /** 無ければ作る（index.html の構造が変わっても落ちないように） */
 function ensure(root: HTMLElement, selector: string, create: () => HTMLElement, parent: HTMLElement = root): HTMLElement {

@@ -13,7 +13,8 @@
     "test:watch": "vitest",
     "e2e": "playwright test",
     "e2e:typecheck": "tsc -p e2e",
-    "screenshots": "playwright test --config e2e/screenshots.config.ts"
+    "screenshots": "playwright test --config e2e/screenshots.config.ts",
+    "licenses": "vite build --mode licenses"
   },
   "dependencies": {
     "@mapbox/vector-tile": "^3.0.0",

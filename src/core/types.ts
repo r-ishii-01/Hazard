@@ -253,7 +253,85 @@ export interface LayerState {
 }
 
 export type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+// ---------------------------------------------------------------------------
+// 公式の津波浸水想定（人物の評価に使う画素ごとの階級）
+// ---------------------------------------------------------------------------
+
+/**
+ * 公式の津波浸水想定（神奈川県。ハザードマップポータルサイトの配信タイル）を、計算範囲の z15 画素ごとの
+ * 浸水深の階級コードにしたもの（src/data/officialHazard*.ts）。
+ * 画素 (px, py)（全球ピクセル座標 − origin）のコードは codes[py * width + px]:
+ *   0 = 浸水想定区域の外（タイルに色なし）、1〜8 = DEPTH_CLASSES[code - 1]、255 = 不明（タイルを取得できなかった・色が凡例と合わない）
+ */
+export interface OfficialInundationData {
+  /** 画素のズーム（常に 15） */
+  zoom: number;
+  /** 西端・北端の全球ピクセル座標 */
+  originPx: number;
+  originPy: number;
+  width: number;
+  height: number;
+  codes: Uint8Array;
+  /** タイルの総数・ミラーから読んだ数・配信元から読んだ数・データなし（404）の数・取得できなかった数 */
+  tiles: number;
+  fromMirror: number;
+  fromRemote: number;
+  missing: number;
+  failed: number;
+}
+
+/** 地図に重ねる公式ハザードマップのタイル（配信元から直接読む）を取得できるか */
+export type OfficialDisplayStatus = 'unknown' | 'checking' | 'ok' | 'error';
+
+export interface OfficialInundationState {
+  /** 人物の評価に使うデータ（data）の読み込み状態。サイト内のミラーを優先し、無ければ配信元から */
+  status: LoadStatus;
+  data: OfficialInundationData | null;
+  /** 画面表示用の説明（読み込めなかった理由・一部のタイルを読めなかったことなど） */
+  message?: string;
+  /**
+   * 地図に重ねる公式ハザードマップ（2D・3D は配信元のタイルを直接表示する）を取得できるか。
+   * 'error' のときは、地図に色が無くても「浸水しない」という意味ではないことを画面に示す。
+   */
+  display: OfficialDisplayStatus;
+}
 export type SimStatus = 'idle' | 'running' | 'done' | 'error';
+
+/**
+ * 計算を始めた時の条件と地形。sim.output はこの条件・この格子（オブジェクトそのもの）で計算した結果。
+ * 表示中の結果が「どの条件の結果か」「今の地形の上の結果か」は、これと現在の状態を比べて判断する（core/results.ts）。
+ */
+export interface SimRunInfo {
+  /** 計算に使ったパラメータ（計算開始時の params そのもの） */
+  params: SimParams;
+  /** 計算開始時に選ばれていた震度 */
+  shindo: ShindoLevel;
+  /** 計算開始時に選ばれていたシナリオ ID */
+  scenarioId: string;
+  /** 計算に使った地形の格子。地形を読み込み直すと別のオブジェクトになる */
+  grid: TerrainGrid;
+}
+
+/** 計算の状態 */
+export interface SimState {
+  status: SimStatus;
+  progress: number;
+  /**
+   * 計算結果（計算中は逐次増える）。中止・失敗の後も途中までの結果が残る（完了かどうかは core/results.ts の
+   * outputComplete で結果そのものから判断する。status では判断しない）。
+   * 表示に使うときは core/results.ts の usableOutput(state) を通す（今の地形の上の結果だけを返す）。
+   */
+  output: SimOutput | null;
+  message?: string;
+  runId: number;
+  /** 初めて開いたときに自動で始めた計算なら true（UI の説明表示用） */
+  auto?: boolean;
+  /** 実行中・表示中の計算の条件と地形（計算を始めていなければ null） */
+  run: SimRunInfo | null;
+  /** 地形の読み込みが終わったら計算を始める予約があるか */
+  queued: boolean;
+}
 
 export interface CursorInfo {
   lon: number;
@@ -310,10 +388,10 @@ export interface AppState {
   /** 実行パラメータ（UI で編集） */
   params: SimParams;
   /**
-   * 計算の状態。auto は、初めて開いたときに自動で始めた計算なら true（UI の説明表示用）。
-   * output は SimOutput に加え、sim モジュールの実装では notes（注記）・revision（更新番号）なども持つ。
+   * 計算の状態（SimState）。
+   * output は SimOutput に加え、sim モジュールの実装では notes（注記）・revision（更新番号）・complete なども持つ。
    */
-  sim: { status: SimStatus; progress: number; output: SimOutput | null; message?: string; runId: number; auto?: boolean };
+  sim: SimState;
   /** 時刻（地震発生からの秒）と再生状態。speed は実時間1秒あたりのシミュレーション秒 */
   time: { t: number; playing: boolean; speed: number };
   people: Person[];
@@ -324,6 +402,11 @@ export interface AppState {
   shelters: Shelter[];
   /** 避難場所データの出所（読み込み後に設定。未読み込み・読み込み中は undefined） */
   sheltersInfo?: SheltersInfo;
+  /**
+   * 公式の津波浸水想定（神奈川県）の画素ごとの階級（人物の評価で「公式の浸水想定区域か」を判定する）と、
+   * 地図に重ねる公式ハザードマップのタイルを取得できるか。レイヤーの表示の有無は layers.officialHazard
+   */
+  officialInundation: OfficialInundationState;
   cursor: CursorInfo | null;
   /**
    * 地図・3D の視点を移す要求（地名検索・現在地など）。seq が増えるたびに各ビューが移動する。

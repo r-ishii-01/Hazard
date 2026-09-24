@@ -1,11 +1,14 @@
 /**
  * 人物マーカー（HTML）と避難経路（ライン）・避難先（円）の表示。
  * 位置は毎フレーム personStateAt で求め、変化があったときだけ DOM を触る。
+ * 状態の表示名・色は「人物」タブの凡例と同じ（people の PERSON_STATUS_INFO・personStatusLabel）。
+ * 経路と避難先はそれぞれ内容が変わったときだけ地図のソースを更新する（避難先は再生中に変わらない）。
  */
 import { Marker, type GeoJSONSource, type Map as MapLibreMap } from 'maplibre-gl';
 import type { AppActions } from '../core/controller';
 import type { EvacPlan, Person, PersonState, PersonStatus, SimOutput, TerrainGrid } from '../core/types';
-import { PERSON_PROFILES, personStateAt } from '../people';
+import { formatDepth } from '../core/format';
+import { PERSON_PROFILES, personStateAt, personStatusLabel } from '../people';
 import { FLAG_SVG, STATUS_STYLE, personIconSvg, statusBadgeSvg } from './icons';
 import { IDS, emptyFC, type GeoFeature, type GeoFeatureCollection } from './style';
 
@@ -48,6 +51,9 @@ export class PeopleLayer {
   /** ドラッグで位置を変えた直後、再計算前の古い計画（使わない） */
   private stalePlans = new Map<string, EvacPlan | undefined>();
   private lastRouteKey = '';
+  private lastTargetKey = '';
+  /** 経路・避難先のソースを更新した回数（計測・テスト用） */
+  setDataCount = { routes: 0, targets: 0 };
   private targetLabel: Marker | null = null;
   private targetLabelKey = '';
   private lastCtx: PeopleContext | null = null;
@@ -196,6 +202,8 @@ export class PeopleLayer {
       v.el.classList.add(`m2d-person--${status}`);
       v.status = status;
       v.el.style.setProperty('--m2d-ring', STATUS_STYLE[status].color);
+      // 状態の色の上のバッジ・浸水深の札の文字色（明るい色の上では濃い色）
+      v.el.style.setProperty('--m2d-ink', STATUS_STYLE[status].ink);
       v.badge.innerHTML = statusBadgeSvg(status);
     }
     const depthText = st.depth >= 0.01 ? formatDepth(st.depth) : '';
@@ -204,7 +212,7 @@ export class PeopleLayer {
       v.depthEl.textContent = depthText ? `浸水 ${depthText}` : '';
       v.depthEl.hidden = !depthText;
     }
-    const title = `${p.name}（${profile?.label ?? p.kind}）: ${STATUS_STYLE[status].label}${depthText ? ` / 浸水深 ${depthText}` : ''}${st.message ? ` — ${st.message}` : ''}`;
+    const title = `${p.name}（${profile?.label ?? p.kind}）: ${personStatusLabel(p, status)}${depthText ? ` / 浸水深 ${depthText}` : ''}${st.message ? ` — ${st.message}` : ''}`;
     if (v.title !== title) {
       v.title = title;
       v.el.title = title;
@@ -262,11 +270,17 @@ export class PeopleLayer {
         features.push({ type: 'Feature', properties: { id: p.id, part: 'ahead', color, sel }, geometry: { type: 'LineString', coordinates: split.ahead } });
       }
     }
-    for (const f of targets) keyParts.push(`T${(f.properties as { id: string }).id}:${JSON.stringify(f.geometry)}:${(f.properties as { sel: boolean }).sel}`);
+    // 経路（通過済みと、これから進む部分の境目が時刻とともに動く）と避難先（再生中は変わらない）は別々に判定する
     const key = keyParts.join('|');
     if (key !== this.lastRouteKey) {
       this.lastRouteKey = key;
+      this.setDataCount.routes += 1;
       setData(this.map, IDS.routeSource, { type: 'FeatureCollection', features });
+    }
+    const targetKey = targets.map((f) => `${(f.properties as { id: string }).id}:${JSON.stringify(f.geometry)}:${(f.properties as { sel: boolean }).sel}:${(f.properties as { color: string }).color}`).join('|');
+    if (targetKey !== this.lastTargetKey) {
+      this.lastTargetKey = targetKey;
+      this.setDataCount.targets += 1;
       setData(this.map, IDS.targetSource, { type: 'FeatureCollection', features: targets });
     }
     this.updateTargetLabel(selTarget);
@@ -300,9 +314,22 @@ export class PeopleLayer {
   /** 経路を消す（データなし時） */
   clearRoutes(): void {
     this.lastRouteKey = '';
+    this.lastTargetKey = '';
     setData(this.map, IDS.routeSource, emptyFC());
     setData(this.map, IDS.targetSource, emptyFC());
     this.updateTargetLabel(null);
+  }
+
+  /**
+   * 前の計算結果への参照を手放す（新しい計算が始まった・地形を読み込み直したとき）。
+   * 直近の状態（ドラッグの終わりの処理用）の計算結果と避難計画も手放す: 計画は、計算結果を参照する
+   * 状態判定のキャッシュ（people）のキーなので、古い計画を持ち続けると古い計算結果もメモリに残る。
+   * 地図を表示していれば、すぐ次の update で今の状態に置き換わる。
+   */
+  dropOutput(current: SimOutput | null): void {
+    const c = this.lastCtx;
+    if (c && c.output !== current) this.lastCtx = { ...c, output: null, plans: {} };
+    this.stalePlans.clear();
   }
 
   destroy(): void {
@@ -311,10 +338,6 @@ export class PeopleLayer {
     this.targetLabel?.remove();
     this.targetLabel = null;
   }
-}
-
-function formatDepth(d: number): string {
-  return d < 1 ? `${d.toFixed(2)}m` : d < 10 ? `${d.toFixed(1)}m` : `${Math.round(d)}m`;
 }
 
 /** 経路を時刻 t で「通過済み」と「これから」に分ける */

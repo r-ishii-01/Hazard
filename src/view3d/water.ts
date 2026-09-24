@@ -2,17 +2,22 @@
  * 水面メッシュ（地形と同じ解像度・同じ三角形分割）。
  *
  * 頂点ごとの値
- * - uW（テクスチャ、nx × ny、RGBA 浮動小数点）= (水位 η [m, T.P.], 全水深 D [m], 表示 α, 水位の上昇速度 [m/s])。
- *   頂点シェーダが頂点番号（gl_VertexID = セル番号）で読み、上下左右のセルとの差から水面の勾配も求める
+ * - uW0 / uW1（テクスチャ、nx × ny、RGBA 浮動小数点）= 時刻をはさむ2つの出力フレーム（キーフレーム）での
+ *   (水位 η [m, T.P.], 全水深 D [m], 表示 α, 水位の上昇速度 [m/s])。頂点シェーダが uF（0〜1）で線形補間する。
+ *   頂点番号（gl_VertexID = セル番号）で読み、上下左右のセルとの差から水面の勾配も求める
  *   （勾配は陰影と、段波・砕波の白波に使う。CPU で計算するより軽い）
  * - aBed = 地盤高 [m, T.P.]（静的）。η − aBed が画素ごとの水の厚さで、地形と交わる線（水際）でちょうど 0 になる
  *
- * 表示のしかた
+ * 表示のしかた（キーフレームごとに CPU で求める）
  * - 濡れたセル（D ≥ 0.01 m）は η に置く
  * - 乾いたセルでも、隣に濡れたセルがあり地盤が隣の水位より高ければ、水面を平らに延長する
  *   （地形と交わる線がちょうど水際になり、海岸線・浸水の先端が正しい位置に出る）
  * - それ以外の乾いたセルは地面より下に沈めて α=0（見えない）
  * シミュレーション前は、海のセルに潮位の静かな海を張る。
+ *
+ * 再生中の負荷: キーフレームは出力フレーム（20 秒ごと）の境目を越えたときだけ1枚求めて転送し、
+ * 毎フレームは補間の重み uF を変えるだけ（CPU の全セル処理とテクスチャの全面転送を毎フレーム行わない）。
+ * 濡れたセルでは、補間した値は全水深・上昇速度をフレーム間で線形補間した値（SimOutput の契約）と一致する。
  *
  * 色は水深で決め、波の山・谷は平常の潮位からの高さで明暗を付ける（空間・時間とも連続）。
  * 上昇速度は前後のフレームの中心差分を時刻で補間した連続な値で、浸水の先端・砕波の白波（前進しているか）にだけ使う。
@@ -49,7 +54,9 @@ const WATER_VERT = /* glsl */ `
 #include <fog_pars_vertex>
 attribute float aBed;
 attribute float aLand;
-uniform highp sampler2D uW;
+uniform highp sampler2D uW0;
+uniform highp sampler2D uW1;
+uniform float uF;
 uniform ivec2 uGrid;
 uniform float uDx;
 uniform float uTime;
@@ -59,12 +66,16 @@ varying vec2 vB;    // 陸か, 平常の潮位からの高さ
 varying vec2 vGrad;
 varying vec3 vWorld;
 varying vec2 vXZ;
+// 時刻をはさむ2つのキーフレームの値を補間
+vec4 fetchW(ivec2 ij) {
+  return mix(texelFetch(uW0, ij, 0), texelFetch(uW1, ij, 0), uF);
+}
 // 表示している隣のセルとの差分で求めた水面の勾配（片側しか見えていなければ片側差分）
 vec2 surfaceGradient(ivec2 ij, vec4 w) {
-  vec4 l = texelFetch(uW, ivec2(max(ij.x - 1, 0), ij.y), 0);
-  vec4 r = texelFetch(uW, ivec2(min(ij.x + 1, uGrid.x - 1), ij.y), 0);
-  vec4 u = texelFetch(uW, ivec2(ij.x, max(ij.y - 1, 0)), 0);
-  vec4 d = texelFetch(uW, ivec2(ij.x, min(ij.y + 1, uGrid.y - 1)), 0);
+  vec4 l = fetchW(ivec2(max(ij.x - 1, 0), ij.y));
+  vec4 r = fetchW(ivec2(min(ij.x + 1, uGrid.x - 1), ij.y));
+  vec4 u = fetchW(ivec2(ij.x, max(ij.y - 1, 0)));
+  vec4 d = fetchW(ivec2(ij.x, min(ij.y + 1, uGrid.y - 1)));
   float hl = (ij.x > 0 && l.z > 0.0) ? 1.0 : 0.0;
   float hr = (ij.x < uGrid.x - 1 && r.z > 0.0) ? 1.0 : 0.0;
   float hu = (ij.y > 0 && u.z > 0.0) ? 1.0 : 0.0;
@@ -77,7 +88,7 @@ vec2 surfaceGradient(ivec2 ij, vec4 w) {
 }
 void main() {
   ivec2 ij = ivec2(gl_VertexID % uGrid.x, gl_VertexID / uGrid.x);
-  vec4 aW = texelFetch(uW, ij, 0);
+  vec4 aW = fetchW(ij);
   vec3 p = vec3(position.x, aW.x, position.z);
   // 沖の静かなうねり（数十 cm、鉛直強調前）。計算範囲の端では 0 にして、範囲外の海と高さをそろえる
   int edgeCells = min(min(ij.x, uGrid.x - 1 - ij.x), min(ij.y, uGrid.y - 1 - ij.y));
@@ -212,37 +223,74 @@ void main() {
 /** 浸水の色 */
 export type FloodColorMode = 'water' | 'classes';
 
+/** 1つの出力フレーム（または計算前の静かな海）での頂点の値 */
+interface KeyFrame {
+  /** 作るたびに増える番号（表示中のものと同じか判定する） */
+  id: number;
+  /** 'still|潮位' または 'フレーム番号|前のフレーム|次のフレーム'（上昇速度の差分に使ったフレーム） */
+  key: string;
+  /** 出力フレームの番号（静かな海は -1） */
+  index: number;
+  /** セルごとの (η, D, α, 上昇速度)。テクスチャの中身 */
+  data: Float32Array;
+  /** 境界のセルの (D, η, 0, 0)（edgeProfile と同じ並び） */
+  edge: Float32Array;
+  edgeEta: number;
+  /** 処理対象外のセルに「見えない」値を書いたときの mask の世代（同じなら書き直さなくてよい） */
+  maskGen: number;
+}
+
+/** GPU のテクスチャ（2枚。uW0・uW1 に割り当てる） */
+interface Slot {
+  tex: DataTexture;
+  kf: KeyFrame | null;
+  /** 転送した時点の kf.id（配列を使い回すので、別のキーフレームになったら転送し直す） */
+  uploadedId: number;
+}
+
+/** 保持するキーフレームの数（時刻をはさむ2枚と、行き来したときのための1枚） */
+const MAX_KEYFRAMES = 3;
+/** 保持する出力フレーム（全水深）の数 */
+const MAX_DEPTH_FRAMES = 4;
+
 export class WaterLayer {
   readonly material: ShaderMaterial;
   mesh: Mesh | null = null;
   private grid: TerrainGrid | null = null;
-  /** 頂点ごとの (η, D, α, 上昇速度)。uW テクスチャの中身で、人形の高さ合わせ（surfaceAt）にも使う */
-  private wData = new Float32Array(0);
-  private wTex: DataTexture | null = null;
+  private slots: [Slot, Slot] | null = null;
   /** 格子の外周のセルか（隣のセルを調べるときの範囲の確認を省くため） */
   private border = new Uint8Array(0);
-  private depth = new Float32Array(0);
-  private rate = new Float32Array(0);
-  /** 取り出したフレームの全水深（フレーム番号 → 配列）。時刻をはさむ2枚と、その前後1枚ずつを保持 */
+  /** キーフレームを求めるときの作業用（濡れているか・水位） */
+  private wetW = new Uint8Array(0);
+  private wetS = new Float32Array(0);
+  /** 全セル「見えない」の値（キーフレームの初期値） */
+  private hidden = new Float32Array(0);
+  /** 取り出したフレームの全水深（フレーム番号 → 配列） */
   private readonly frames = new Map<number, Float32Array>();
   private framePool: Float32Array[] = [];
   private framesOutput: SimOutput | null = null;
   private framesRun = '';
-  private bracket = '';
-  private f0: Float32Array | null = null;
-  private f1: Float32Array | null = null;
-  private fPrev: Float32Array | null = null;
-  private fNext: Float32Array | null = null;
-  /** 上昇速度の中心差分の分母 [s]（時刻をはさむ2フレームそれぞれ） */
-  private span0 = 1;
-  private span1 = 1;
-  private wetW = new Uint8Array(0);
-  private wetS = new Float32Array(0);
+  /** 求めたキーフレーム（key → 値）。古いものから捨てる */
+  private readonly keyframes = new Map<string, KeyFrame>();
+  private kfPool: KeyFrame[] = [];
+  private kfSeq = 0;
   /** 処理対象のセル（0: 対象外, 1: 周辺, 2: 水に関わる） */
   private mask = new Uint8Array(0);
   private maskFor: SimOutput | 'still' | null = null;
-  private maskBracket = '';
+  private maskGen = 0;
+  /** mask に反映済みのフレーム番号 */
+  private readonly maskedFrames = new Set<number>();
   private active = new Int32Array(0);
+  /** 表示中のキーフレームと補間の重み */
+  private shown: { k0: KeyFrame; k1: KeyFrame; f: number } | null = null;
+  /** 今の update で使うので捨てないキーフレーム */
+  private pinned: KeyFrame | null = null;
+  /** 表示中の潮位（先に求めるキーフレームの境界の値に使う） */
+  private shownTide = 0;
+  /** 先に求めかけているキーフレーム（再生中の prefetch） */
+  private job: { key: string; output: SimOutput; steps: Generator<void, KeyFrame, void> } | null = null;
+  /** 値を書き込み中のキーフレームの入れ物（取りやめたときに使い回す） */
+  private building: KeyFrame | null = null;
   /** 計算範囲の境界（海側）の平均水位 [m, T.P.]（範囲外の海の高さに使う） */
   edgeEta = 0;
   /**
@@ -250,10 +298,13 @@ export class WaterLayer {
    * 範囲外の海をこれに続けて描き、境界で継ぎ目が出ないようにする（environment.ts）
    */
   edgeProfile = new Float32Array(0);
-  /** 最後に描いた状態（同じなら再計算しない） */
+  /** 最後に描いた状態（同じなら何もしない） */
   private lastKey = '';
   /** 直近の update の CPU 時間 [ms]（デバッグ・計測用） */
   lastUpdateMs = 0;
+  /** これまでに求めたキーフレームの数・GPU へ転送した量 [byte]（デバッグ・計測用） */
+  keyframeBuilds = 0;
+  uploadBytes = 0;
 
   constructor() {
     const classMin = DEPTH_CLASSES.map((c) => c.min);
@@ -275,6 +326,7 @@ export class WaterLayer {
           uGrid: { value: new Vector2(1, 1) },
           uDx: { value: 1 },
           uClassMode: { value: 0 },
+          uF: { value: 0 },
         },
       ]),
       vertexShader: WATER_VERT,
@@ -285,7 +337,8 @@ export class WaterLayer {
     });
     // UniformsUtils.merge は値を複製する（テクスチャ・配列・共有の uniform は複製しないよう後から加える）
     Object.assign(this.material.uniforms, {
-      uW: { value: null },
+      uW0: { value: null },
+      uW1: { value: null },
       uClassMin: { value: classMin },
       uClassColor: { value: classColor },
       uSunDir: LIGHT_UNIFORMS.uSunDir,
@@ -318,6 +371,7 @@ export class WaterLayer {
     const pos = new Float32Array(n * 3);
     const land = new Float32Array(n);
     const bed = new Float32Array(n);
+    const hidden = new Float32Array(n * 4);
     for (let j = 0; j < ny; j++) {
       for (let i = 0; i < nx; i++) {
         const k = j * nx + i;
@@ -326,10 +380,10 @@ export class WaterLayer {
         land[k] = grid.kind[k] === CELL_LAND ? 1 : 0;
         // 池は水面（z + 0.05）の下に見かけの水深を持たせる
         bed[k] = grid.kind[k] === CELL_INLAND_WATER ? grid.z[k] + 0.05 - POND_DEPTH : grid.z[k];
+        hidden[k * 4] = grid.z[k] - 0.6;
       }
     }
-    this.depth = new Float32Array(n);
-    this.rate = new Float32Array(n);
+    this.hidden = hidden;
     this.border = new Uint8Array(n);
     for (let i = 0; i < nx; i++) this.border[i] = this.border[(ny - 1) * nx + i] = 1;
     for (let j = 0; j < ny; j++) this.border[j * nx] = this.border[j * nx + nx - 1] = 1;
@@ -337,22 +391,27 @@ export class WaterLayer {
     this.wetS = new Float32Array(n);
     this.mask = new Uint8Array(n);
     this.maskFor = null;
-    this.maskBracket = '';
     this.active = new Int32Array(0);
-    this.resetFrames();
     const geo = new BufferGeometry();
     geo.setAttribute('position', new BufferAttribute(pos, 3));
-    this.wData = new Float32Array(n * 4);
     // 補間はしない（頂点ごとに texelFetch で読む）。浮動小数点テクスチャの線形補間に対応しない環境でも使える
-    const tex = new DataTexture(this.wData, nx, ny, RGBAFormat, FloatType);
-    tex.magFilter = NearestFilter;
-    tex.minFilter = NearestFilter;
-    tex.generateMipmaps = false;
-    tex.flipY = false;
-    tex.needsUpdate = true;
-    this.wTex = tex;
+    // 中身はキーフレームの配列を割り当てたときに入れる（それまでは転送しないので、水面は見えない）
+    const makeTex = (): DataTexture => {
+      const tex = new DataTexture(null, nx, ny, RGBAFormat, FloatType);
+      tex.magFilter = NearestFilter;
+      tex.minFilter = NearestFilter;
+      tex.generateMipmaps = false;
+      tex.flipY = false;
+      return tex;
+    };
+    this.slots = [
+      { tex: makeTex(), kf: null, uploadedId: -1 },
+      { tex: makeTex(), kf: null, uploadedId: -1 },
+    ];
     const u = this.material.uniforms;
-    u.uW.value = tex;
+    u.uW0.value = this.slots[0].tex;
+    u.uW1.value = this.slots[1].tex;
+    u.uF.value = 0;
     u.uGrid.value.set(nx, ny);
     u.uDx.value = dx;
     geo.setAttribute('aBed', new BufferAttribute(bed, 1));
@@ -367,82 +426,227 @@ export class WaterLayer {
 
   /**
    * 水面を更新。output が null なら潮位 tide の静かな海。
-   * 戻り値: 実際に更新したら true
+   * 戻り値: 表示が変わったら true
    *
-   * 全水深はフレーム間の線形補間（SimOutput の契約どおり）。時刻をはさむ2フレームとその前後1枚を
-   * fillDepth で取り出して保持し、上昇速度は各フレームでの中心差分を時刻で線形補間する（フレームの境目で跳ばない）。
+   * 全水深はフレーム間の線形補間（SimOutput の契約どおり）。時刻をはさむ2フレームそれぞれの頂点の値
+   * （キーフレーム）を求めて GPU に置き、補間はシェーダで行う。上昇速度は各フレームでの中心差分を時刻で線形補間する
+   * （フレームの境目で跳ばない）。
    */
   update(output: SimOutput | null, t: number, tide: number, runKey: string): boolean {
     const grid = this.grid;
-    const tex = this.wTex;
-    if (!grid || !tex) return false;
-    const key = output ? `${runKey}|${t.toFixed(3)}|${output.framesReady()}` : `still|${tide}`;
+    if (!grid || !this.slots) return false;
+    const t0 = performance.now();
+    let k0: KeyFrame;
+    let k1: KeyFrame;
+    let f = 0;
+    if (output) {
+      if (output !== this.framesOutput || runKey !== this.framesRun) {
+        this.releaseOutput();
+        this.framesOutput = output;
+        this.framesRun = runKey;
+      }
+      const fi = output.frameInterval > 0 ? output.frameInterval : 1;
+      const ready = Math.max(1, output.framesReady());
+      const tr = Math.max(0, Math.min(t, output.timeReady()));
+      let i0 = Math.floor(tr / fi + 1e-9);
+      let i1 = i0 + 1;
+      if (i1 > ready - 1) {
+        i1 = ready - 1;
+        i0 = Math.max(0, i1 - 1);
+      }
+      f = i1 > i0 ? Math.min(1, Math.max(0, (tr - i0 * fi) / fi)) : 0;
+      k0 = this.frameKeyframe(output, i0, ready, fi, tide);
+      // k1 を求めるときに k0 の入れ物を使い回さない
+      this.pinned = k0;
+      k1 = i1 === i0 ? k0 : this.frameKeyframe(output, i1, ready, fi, tide);
+      this.pinned = null;
+    } else {
+      // 計算結果を表示しない: 前の結果（フレーム・キーフレーム）を持ち続けない
+      if (this.framesOutput) this.releaseOutput();
+      k0 = k1 = this.stillKeyframe(tide);
+    }
+    const key = `${k0.id}/${k1.id}/${f}|${tide}`;
     if (key === this.lastKey) return false;
     this.lastKey = key;
-    const t0 = performance.now();
     this.material.uniforms.uTide.value = tide;
-    const { nx, ny } = grid.spec;
-    const n = nx * ny;
+    this.bind(k0, k1);
+    this.material.uniforms.uF.value = f;
+    this.shown = { k0, k1, f };
+    this.shownTide = tide;
+    this.lerpEdge(k0, k1, f);
+    this.lastUpdateMs = performance.now() - t0;
+    return true;
+  }
+
+  /**
+   * 計算結果への参照を手放す（フレーム・キーフレーム・処理対象のセル）。次の update で作り直す。
+   * 3D を表示していない間に新しい計算が始まったときなど、古い結果をメモリに残さないために呼ぶ。
+   */
+  releaseOutput(): void {
+    this.cancelJob();
+    this.resetFrames();
+    for (const kf of this.keyframes.values()) this.recycle(kf);
+    this.keyframes.clear();
+    this.framesOutput = null;
+    this.framesRun = '';
+    if (this.maskFor !== 'still') this.maskFor = null;
+    this.maskedFrames.clear();
+    this.shown = null;
+    this.lastKey = '';
+  }
+
+  /** 2つのキーフレームを uW0・uW1 に割り当てる（テクスチャの転送は、中身が変わったものだけ） */
+  private bind(k0: KeyFrame, k1: KeyFrame): void {
+    const slots = this.slots!;
+    const holds = (s: Slot, kf: KeyFrame) => s.kf === kf && s.uploadedId === kf.id;
+    // すでに転送済みのテクスチャはそのまま使う（時刻が進むと、前の k1 が次の k0 になる）
+    let s0 = holds(slots[0], k0) ? slots[0] : holds(slots[1], k0) ? slots[1] : null;
+    let s1 = holds(slots[1], k1) && slots[1] !== s0 ? slots[1] : holds(slots[0], k1) && slots[0] !== s0 ? slots[0] : null;
+    if (k0 === k1) s1 = s0;
+    if (!s0) {
+      s0 = s1 === slots[0] ? slots[1] : slots[0];
+      this.upload(s0, k0);
+    }
+    if (!s1) {
+      s1 = s0 === slots[0] ? slots[1] : slots[0];
+      this.upload(s1, k1);
+    }
+    const u = this.material.uniforms;
+    u.uW0.value = s0.tex;
+    u.uW1.value = s1.tex;
+  }
+
+  private upload(slot: Slot, kf: KeyFrame): void {
+    slot.kf = kf;
+    slot.uploadedId = kf.id;
+    slot.tex.image.data = kf.data;
+    slot.tex.needsUpdate = true;
+    this.uploadBytes += kf.data.byteLength;
+  }
+
+  /** 境界の値（範囲外の海に使う）を2つのキーフレームの間で補間 */
+  private lerpEdge(k0: KeyFrame, k1: KeyFrame, f: number): void {
+    const e0 = k0.edge;
+    const e1 = k1.edge;
+    if (this.edgeProfile.length !== e0.length) this.edgeProfile = new Float32Array(e0.length);
+    const out = this.edgeProfile;
+    if (k0 === k1 || f === 0) out.set(e0);
+    else if (f === 1) out.set(e1);
+    else for (let q = 0; q < out.length; q++) out[q] = e0[q] + (e1[q] - e0[q]) * f;
+    this.edgeEta = k0.edgeEta + (k1.edgeEta - k0.edgeEta) * f;
+  }
+
+  /** 計算前（計算結果を表示しない）: 潮位の静かな海 */
+  private stillKeyframe(tide: number): KeyFrame {
+    const key = `still|${tide}`;
+    const have = this.keyframes.get(key);
+    if (have) return have;
+    this.cancelJob();
+    return this.runBuild(this.stillSteps(key, tide));
+  }
+
+  private *stillSteps(key: string, tide: number): Generator<void, KeyFrame, void> {
+    const grid = this.grid!;
     const z = grid.z;
     const kind = grid.kind;
-    const D = this.depth;
-    const R = this.rate;
     const W = this.wetW;
     const S = this.wetS;
-    let list: Int32Array;
-    // 1) 全水深・上昇速度と、濡れているか（水に関わりうるセルだけ）
-    if (output) {
-      const f = this.selectFrames(output, t, runKey);
-      list = this.activeCells(output, D);
-      const A = this.f0!;
-      const B = this.f1!;
-      const P = this.fPrev!;
-      const N = this.fNext!;
-      const w0 = (1 - f) / this.span0;
-      const w1 = f / this.span1;
-      const m = list.length;
-      for (let q = 0; q < m; q++) {
-        const k = list[q];
-        const a = A[k];
-        const b = B[k];
-        const d = a + (b - a) * f;
-        D[k] = d;
-        R[k] = (b - P[k]) * w0 + (N[k] - a) * w1;
-        if (d >= WET && d < 1e4) {
-          W[k] = 1;
-          S[k] = z[k] + d;
-        } else W[k] = 0;
-      }
-    } else {
-      for (let k = 0; k < n; k++) {
-        D[k] = kind[k] === CELL_SEA ? Math.max(0, tide - z[k]) : 0;
-        R[k] = 0;
-      }
-      list = this.activeCells(null, D);
-      const m = list.length;
-      for (let q = 0; q < m; q++) {
-        const k = list[q];
-        const d = D[k];
-        if (d >= WET) {
-          W[k] = 1;
-          S[k] = z[k] + d;
-        } else W[k] = 0;
-      }
+    const list = this.activeCellsStill(tide);
+    const m = list.length;
+    for (let q = 0; q < m; q++) {
+      const k = list[q];
+      const d = kind[k] === CELL_SEA ? Math.max(0, tide - z[k]) : 0;
+      if (d >= WET) {
+        W[k] = 1;
+        S[k] = z[k] + d;
+      } else W[k] = 0;
     }
-    // 2) 頂点の値。乾いたセルは 8 近傍の濡れたセルの平均水位（と平均の上昇速度）
-    const a = this.wData;
+    return yield* this.buildSteps(key, -1, list, (k) => (kind[k] === CELL_SEA ? Math.max(0, tide - z[k]) : 0), () => 0, tide, new Set());
+  }
+
+  /** 出力フレーム i のキーフレームの key（上昇速度の差分に使う前後のフレームを含む） */
+  private frameKey(i: number, ready: number): string {
+    return `${i}|${Math.max(0, i - 1)}|${Math.min(ready - 1, i + 1)}`;
+  }
+
+  /** 出力フレーム i のキーフレーム（上昇速度は前後のフレームとの中心差分。端では片側差分） */
+  private frameKeyframe(output: SimOutput, i: number, ready: number, fi: number, tide: number): KeyFrame {
+    const key = this.frameKey(i, ready);
+    const have = this.keyframes.get(key);
+    if (have) return have;
+    // 先に求めかけていたものが同じなら、残りをここで仕上げる
+    const job = this.job;
+    if (job && job.key === key && job.output === output) {
+      this.job = null;
+      return this.runBuild(job.steps);
+    }
+    // 別のものを求めかけていたら取りやめる（作業用の配列を共有するため）
+    this.cancelJob();
+    return this.runBuild(this.frameSteps(output, i, ready, fi, tide, key, new Set(this.pinned ? [this.pinned] : [])));
+  }
+
+  /**
+   * キーフレームを求める手順（yield のたびに中断できる。再生中に少しずつ先に求めておくため）。
+   * wetW・wetS・全水深のフレームを作業用に使うので、同時に進められるのは 1 つだけ。
+   */
+  private *frameSteps(output: SimOutput, i: number, ready: number, fi: number, tide: number, key: string, protect: ReadonlySet<KeyFrame>): Generator<void, KeyFrame, void> {
+    const ip = Math.max(0, i - 1);
+    const inx = Math.min(ready - 1, i + 1);
+    const D = this.depthFrame(output, i, fi);
+    yield;
+    const P = this.depthFrame(output, ip, fi);
+    yield;
+    const N = this.depthFrame(output, inx, fi);
+    // 使い終わった全水深のフレームを手放す（キーフレームに必要なのは前後1枚まで）
+    this.trimFrames([ip, i, inx]);
+    yield;
+    const span = inx > ip ? (inx - ip) * fi : Infinity;
+    const list = this.activeCellsFrame(output, i, D);
+    yield;
+    const z = this.grid!.z;
+    const W = this.wetW;
+    const S = this.wetS;
+    const m = list.length;
+    for (let q = 0; q < m; q++) {
+      const k = list[q];
+      const d = D[k];
+      if (d >= WET && d < 1e4) {
+        W[k] = 1;
+        S[k] = z[k] + d;
+      } else W[k] = 0;
+      if ((q & 0xffff) === 0xffff) yield;
+    }
+    return yield* this.buildSteps(key, i, list, (k) => D[k], (k) => (N[k] - P[k]) / span, tide, protect);
+  }
+
+  /**
+   * キーフレームの頂点の値を求める（wetW・wetS は list のセルについて設定済みであること）。
+   * 乾いたセルは 8 近傍の濡れたセルの平均水位（と平均の上昇速度）で水面を延長する。
+   * 仕上がったら keyframes に入れる（protect のキーフレームは、場所を空けるために捨てない）。
+   */
+  private *buildSteps(key: string, index: number, list: Int32Array, depthOf: (k: number) => number, rateOf: (k: number) => number, tide: number, protect: ReadonlySet<KeyFrame>): Generator<void, KeyFrame, void> {
+    const grid = this.grid!;
+    const { nx, ny } = grid.spec;
+    const z = grid.z;
+    const kind = grid.kind;
+    const W = this.wetW;
+    const S = this.wetS;
+    const kf = this.newKeyframe(key, index, protect);
+    this.building = kf;
+    const a = kf.data;
     const border = this.border;
     const m = list.length;
     // 8 近傍のセル番号の差
     const nb = Int32Array.of(-nx - 1, -nx, -nx + 1, -1, 1, nx - 1, nx, nx + 1);
     for (let q = 0; q < m; q++) {
+      if ((q & 0x1fff) === 0x1fff) yield;
       const k = list[q];
       const o = k * 4;
       if (W[k] > 0) {
         a[o] = S[k];
-        a[o + 1] = D[k];
+        a[o + 1] = depthOf(k);
         a[o + 2] = 1;
-        a[o + 3] = R[k];
+        a[o + 3] = rateOf(k);
         continue;
       }
       let cnt = 0;
@@ -455,7 +659,7 @@ export class WaterLayer {
           if (W[kk] > 0) {
             cnt++;
             sum += S[kk];
-            rsum += R[kk];
+            rsum += rateOf(kk);
           }
         }
       } else {
@@ -467,7 +671,7 @@ export class WaterLayer {
             if (kk !== k && W[kk] > 0) {
               cnt++;
               sum += S[kk];
-              rsum += R[kk];
+              rsum += rateOf(kk);
             }
           }
         }
@@ -492,16 +696,105 @@ export class WaterLayer {
         a[o + 3] = 0;
       }
     }
-    this.fillEdgeProfile(a, nx, ny, tide);
-    tex.needsUpdate = true;
-    this.lastUpdateMs = performance.now() - t0;
-    return true;
+    this.fillEdgeProfile(kf, nx, ny, tide);
+    this.building = null;
+    this.keyframes.set(key, kf);
+    this.keyframeBuilds += 1;
+    return kf;
   }
 
-  private fillEdgeProfile(a: Float32Array, nx: number, ny: number, tide: number): void {
+  /** 手順を最後まで進める */
+  private runBuild(steps: Generator<void, KeyFrame, void>): KeyFrame {
+    for (;;) {
+      const r = steps.next();
+      if (r.done) return r.value;
+    }
+  }
+
+  /**
+   * 再生中、次に使うキーフレーム（時刻をはさむ 2 枚の次のフレーム）を少しずつ先に求めておく。
+   * 描画の合間に呼び、budgetMs まで進めて戻る。出力フレームの境目を越えたとき、全セルの計算で
+   * 1 フレームの描画が遅れないようにするため（細かい解像度では 1 枚に十数 ms かかる）。
+   * 戻り値: まだ続きがあるか
+   */
+  prefetch(budgetMs: number): boolean {
+    const sh = this.shown;
+    const output = this.framesOutput;
+    if (!sh || !output || !this.grid || sh.k1.index < 0) return false;
+    const fi = output.frameInterval > 0 ? output.frameInterval : 1;
+    const ready = Math.max(1, output.framesReady());
+    const next = Math.max(sh.k0.index, sh.k1.index) + 1;
+    if (next > ready - 1) return false;
+    const key = this.frameKey(next, ready);
+    if (this.keyframes.has(key)) return false;
+    if (this.job && (this.job.key !== key || this.job.output !== output)) this.cancelJob();
+    if (!this.job) {
+      // 表示中の 2 枚は捨てない（場所が無ければ、それ以外の古いものを捨てる）
+      const protect = new Set([sh.k0, sh.k1]);
+      this.job = { key, output, steps: this.frameSteps(output, next, ready, fi, this.shownTide, key, protect) };
+    }
+    const t0 = performance.now();
+    const job = this.job;
+    for (;;) {
+      const r = job.steps.next();
+      if (r.done) {
+        this.job = null;
+        return false;
+      }
+      if (performance.now() - t0 >= budgetMs) return true;
+    }
+  }
+
+  /** 先に求めかけていたキーフレームを取りやめる（入れ物は使い回す） */
+  private cancelJob(): void {
+    this.job = null;
+    if (this.building) {
+      this.recycle(this.building);
+      this.building = null;
+    }
+  }
+
+  /**
+   * キーフレームの入れ物を用意する（keyframes にはまだ入れない）。多すぎれば古いものから捨てて使い回す。
+   * 処理対象外のセルは「見えない」値にする。
+   */
+  private newKeyframe(key: string, index: number, protect: ReadonlySet<KeyFrame>): KeyFrame {
+    while (this.keyframes.size >= MAX_KEYFRAMES) {
+      let victim: string | null = null;
+      for (const [k, kf] of this.keyframes) {
+        if (protect.has(kf)) continue;
+        victim = k;
+        break;
+      }
+      if (victim === null) break;
+      this.recycle(this.keyframes.get(victim)!);
+      this.keyframes.delete(victim);
+    }
+    const n4 = this.hidden.length;
+    let kf = this.kfPool.pop();
+    if (!kf || kf.data.length !== n4) kf = { id: 0, key: '', index: -1, data: new Float32Array(n4), edge: new Float32Array(0), edgeEta: 0, maskGen: -1 };
+    // 処理対象のセルの一覧は同じ結果の間は増える一方なので、同じ世代なら対象外のセルは「見えない」値のまま
+    if (kf.maskGen !== this.maskGen) {
+      kf.data.set(this.hidden);
+      kf.maskGen = this.maskGen;
+    }
+    kf.id = ++this.kfSeq;
+    kf.key = key;
+    kf.index = index;
+    return kf;
+  }
+
+  private recycle(kf: KeyFrame): void {
+    // 表示中のテクスチャが参照している配列も使い回せる（転送済みの GPU 側の中身は変わらない。
+    // 次に割り当てるときは id が変わるので転送し直す）
+    if (this.kfPool.length < MAX_KEYFRAMES) this.kfPool.push(kf);
+  }
+
+  private fillEdgeProfile(kf: KeyFrame, nx: number, ny: number, tide: number): void {
+    const a = kf.data;
     const len = 2 * ny + nx;
-    if (this.edgeProfile.length !== len * 4) this.edgeProfile = new Float32Array(len * 4);
-    const out = this.edgeProfile;
+    if (kf.edge.length !== len * 4) kf.edge = new Float32Array(len * 4);
+    const out = kf.edge;
     const put = (s: number, k: number): void => {
       const o = k * 4;
       const shown = a[o + 2] > 0;
@@ -520,139 +813,109 @@ export class WaterLayer {
         cnt += 1;
       }
     }
-    this.edgeEta = cnt > 0 ? sum / cnt : tide;
+    kf.edgeEta = cnt > 0 ? sum / cnt : tide;
   }
 
-  /**
-   * 時刻 t をはさむフレーム (i0, i1) と前後のフレームを用意し、補間の重み f を返す。
-   * フレームは番号ごとに取り出して保持するので、時刻が進んでも新しく取り出すのは1枚ずつ。
-   */
-  private selectFrames(output: SimOutput, t: number, runKey: string): number {
-    if (output !== this.framesOutput || runKey !== this.framesRun) {
-      this.resetFrames();
-      this.framesOutput = output;
-      this.framesRun = runKey;
-    }
-    const fi = output.frameInterval > 0 ? output.frameInterval : 1;
-    const ready = Math.max(1, output.framesReady());
-    const tr = Math.max(0, Math.min(t, output.timeReady()));
-    let i0 = Math.floor(tr / fi + 1e-9);
-    let i1 = i0 + 1;
-    if (i1 > ready - 1) {
-      i1 = ready - 1;
-      i0 = Math.max(0, i1 - 1);
-    }
-    const ip = Math.max(0, i0 - 1);
-    const inx = Math.min(ready - 1, i1 + 1);
-    const bk = `${i0}|${i1}|${ip}|${inx}`;
-    if (bk !== this.bracket) {
-      this.bracket = bk;
-      const need = new Set([ip, i0, i1, inx]);
-      for (const [idx, arr] of this.frames) {
-        if (!need.has(idx)) {
-          this.frames.delete(idx);
-          this.framePool.push(arr);
-        }
-      }
-      this.f0 = this.frame(output, i0, fi);
-      this.f1 = this.frame(output, i1, fi);
-      this.fPrev = this.frame(output, ip, fi);
-      this.fNext = this.frame(output, inx, fi);
-      // 中心差分の間隔（端では片側差分。1枚しか無ければ上昇速度 0）
-      this.span0 = Math.max(1, i1 - ip) * fi;
-      this.span1 = Math.max(1, inx - i0) * fi;
-      if (i1 === i0) {
-        this.span0 = Infinity;
-        this.span1 = Infinity;
-      }
-    }
-    return i1 > i0 ? Math.min(1, Math.max(0, (tr - i0 * fi) / fi)) : 0;
-  }
-
-  private frame(output: SimOutput, idx: number, fi: number): Float32Array {
+  /** 出力フレーム idx の全水深（番号ごとに取り出して保持） */
+  private depthFrame(output: SimOutput, idx: number, fi: number): Float32Array {
     let arr = this.frames.get(idx);
     if (arr) return arr;
-    const n = this.depth.length;
+    const n = this.hidden.length / 4;
     arr = this.framePool.pop() ?? new Float32Array(n);
     output.fillDepth(idx * fi, arr);
     this.frames.set(idx, arr);
     return arr;
   }
 
-  private resetFrames(): void {
-    for (const arr of this.frames.values()) if (arr.length === this.depth.length) this.framePool.push(arr);
-    this.frames.clear();
-    this.framePool = this.framePool.filter((a) => a.length === this.depth.length).slice(0, 4);
-    this.bracket = '';
-    this.framesOutput = null;
-    this.framesRun = '';
-    this.f0 = this.f1 = this.fPrev = this.fNext = null;
+  /** keep 以外の全水深のフレームを、上限を超えた分だけ手放す */
+  private trimFrames(keep: number[]): void {
+    if (this.frames.size <= MAX_DEPTH_FRAMES) return;
+    for (const [idx, arr] of this.frames) {
+      if (this.frames.size <= MAX_DEPTH_FRAMES) break;
+      if (keep.includes(idx)) continue;
+      this.frames.delete(idx);
+      this.framePool.push(arr);
+    }
   }
 
-  /**
-   * 処理するセルの一覧。計算結果が変わったら作り直し、同じ計算結果の間は
-   * 「今の2フレームで濡れているセル」とその周りを追加していく（一覧は増える一方）。
-   * 一覧に入っていないセルは常に乾いていて周りも乾いている（非表示のまま）。
-   */
-  private activeCells(output: SimOutput | null, D: Float32Array): Int32Array {
+  private resetFrames(): void {
+    const n = this.hidden.length / 4;
+    for (const arr of this.frames.values()) if (arr.length === n) this.framePool.push(arr);
+    this.frames.clear();
+    this.framePool = this.framePool.filter((a) => a.length === n).slice(0, MAX_DEPTH_FRAMES);
+  }
+
+  /** mask を作り直す（計算結果または静かな海が変わったとき） */
+  private resetMask(key: SimOutput | 'still'): void {
+    // 求めかけのキーフレームは前の一覧（世代）で「見えない」値を書いているので使えない
+    this.cancelJob();
     const grid = this.grid!;
     const { nx, ny } = grid.spec;
     const n = nx * ny;
-    const key = output ? output : 'still';
+    this.maskFor = key;
+    this.maskGen += 1;
+    this.mask.fill(0);
+    this.maskedFrames.clear();
+    const kind = grid.kind;
+    for (let k = 0; k < n; k++) if (kind[k] !== CELL_LAND) this.markAround(k, nx, ny);
+    this.rebuildActive();
+  }
+
+  /**
+   * 処理するセルの一覧（出力フレーム i のキーフレーム用）。計算結果が変わったら作り直し、同じ計算結果の間は
+   * 「そのフレームで濡れているセル・一度でも浸水したセル」とその周りを追加していく（一覧は増える一方）。
+   * 一覧に入っていないセルは、そのフレームで乾いていて周りも乾いている（非表示のまま）。
+   */
+  private activeCellsFrame(output: SimOutput, i: number, D: Float32Array): Int32Array {
+    if (this.maskFor !== output) this.resetMask(output);
+    if (this.maskedFrames.has(i)) return this.active;
+    this.maskedFrames.add(i);
+    const grid = this.grid!;
+    const { nx, ny } = grid.spec;
+    const n = nx * ny;
+    const mask = this.mask;
+    const arr = output.arrival;
     let changed = false;
-    if (key !== this.maskFor) {
-      this.maskFor = key;
-      this.mask.fill(0);
-      this.wetW.fill(0);
-      this.maskBracket = '';
-      // いったん全セルを非表示に
-      const a = this.wData;
-      const z = grid.z;
-      for (let k = 0; k < n; k++) {
-        const o = k * 4;
-        a[o] = z[k] - 0.6;
-        a[o + 1] = 0;
-        a[o + 2] = 0;
-        a[o + 3] = 0;
-      }
-      const kind = grid.kind;
-      for (let k = 0; k < n; k++) if (kind[k] !== CELL_LAND) this.markAround(k, nx, ny);
-      changed = true;
-    }
-    const mb = output ? this.bracket : 'still';
-    if (mb !== this.maskBracket) {
-      this.maskBracket = mb;
-      const mask = this.mask;
-      if (output) {
-        const A = this.f0!;
-        const B = this.f1!;
-        const arr = output.arrival;
-        for (let k = 0; k < n; k++) {
-          if (mask[k] === 2) continue;
-          if (A[k] >= WET || B[k] >= WET || (arr && Number.isFinite(arr[k]))) {
-            this.markAround(k, nx, ny);
-            changed = true;
-          }
-        }
-      } else {
-        for (let k = 0; k < n; k++) {
-          if (mask[k] !== 2 && D[k] >= WET) {
-            this.markAround(k, nx, ny);
-            changed = true;
-          }
-        }
+    for (let k = 0; k < n; k++) {
+      if (mask[k] === 2) continue;
+      if (D[k] >= WET || (arr && Number.isFinite(arr[k]))) {
+        this.markAround(k, nx, ny);
+        changed = true;
       }
     }
-    if (changed) {
-      let c = 0;
-      const mask = this.mask;
-      for (let k = 0; k < n; k++) if (mask[k]) c++;
-      const list = new Int32Array(c);
-      c = 0;
-      for (let k = 0; k < n; k++) if (mask[k]) list[c++] = k;
-      this.active = list;
-    }
+    if (changed) this.rebuildActive();
     return this.active;
+  }
+
+  /** 処理するセルの一覧（静かな海） */
+  private activeCellsStill(tide: number): Int32Array {
+    if (this.maskFor !== 'still') this.resetMask('still');
+    const grid = this.grid!;
+    const { nx, ny } = grid.spec;
+    const n = nx * ny;
+    const mask = this.mask;
+    const z = grid.z;
+    const kind = grid.kind;
+    let changed = false;
+    for (let k = 0; k < n; k++) {
+      if (mask[k] !== 2 && kind[k] === CELL_SEA && tide - z[k] >= WET) {
+        this.markAround(k, nx, ny);
+        changed = true;
+      }
+    }
+    if (changed) this.rebuildActive();
+    return this.active;
+  }
+
+  private rebuildActive(): void {
+    const mask = this.mask;
+    const n = mask.length;
+    let c = 0;
+    for (let k = 0; k < n; k++) if (mask[k]) c++;
+    const list = new Int32Array(c);
+    c = 0;
+    for (let k = 0; k < n; k++) if (mask[k]) list[c++] = k;
+    this.active = list;
   }
 
   /** セル k を「中心」(2)、周り8セルを「周辺」(1 以上) として登録 */
@@ -679,14 +942,38 @@ export class WaterLayer {
    */
   surfaceAt(x: number, zm: number): number | null {
     const grid = this.grid;
-    if (!grid || !this.wTex) return null;
+    const sh = this.shown;
+    if (!grid || !sh) return null;
     const { nx, ny, dx } = grid.spec;
     const fx = x / dx + nx / 2 - 0.5;
     const fy = zm / dx + ny / 2 - 0.5;
-    const a = this.wData;
-    const alpha = triInterp(a, nx, ny, fx, fy, 4, 2);
-    if (alpha < 0.5) return null;
-    return triInterp(a, nx, ny, fx, fy, 4, 0);
+    const f = sh.f;
+    const a0 = sh.k0.data;
+    const a1 = sh.k1.data;
+    const lerp = (off: number): number => {
+      const v0 = triInterp(a0, nx, ny, fx, fy, 4, off);
+      return a1 === a0 || f === 0 ? v0 : v0 + (triInterp(a1, nx, ny, fx, fy, 4, off) - v0) * f;
+    };
+    if (lerp(2) < 0.5) return null;
+    return lerp(0);
+  }
+
+  /** セル k の表示中の値 (η, D, α, 上昇速度)（テスト・デバッグ用。シェーダと同じ補間） */
+  debugCell(k: number): [number, number, number, number] | null {
+    const sh = this.shown;
+    if (!sh) return null;
+    const o = k * 4;
+    const out: [number, number, number, number] = [0, 0, 0, 0];
+    for (let c = 0; c < 4; c++) {
+      const v0 = sh.k0.data[o + c];
+      out[c] = v0 + (sh.k1.data[o + c] - v0) * sh.f;
+    }
+    return out;
+  }
+
+  /** 計算結果を参照しているか（テスト・デバッグ用） */
+  get holdsOutput(): boolean {
+    return this.framesOutput !== null || (this.maskFor !== null && this.maskFor !== 'still') || this.frames.size > 0;
   }
 
   /** 強制的に次回更新させる */
@@ -701,15 +988,22 @@ export class WaterLayer {
       this.mesh.geometry.dispose();
       this.mesh = null;
     }
-    this.wTex?.dispose();
-    this.wTex = null;
-    this.material.uniforms.uW.value = null;
+    if (this.slots) for (const s of this.slots) s.tex.dispose();
+    this.slots = null;
+    this.material.uniforms.uW0.value = null;
+    this.material.uniforms.uW1.value = null;
     this.maskFor = null;
+    this.maskedFrames.clear();
     this.frames.clear();
     this.framePool = [];
-    this.bracket = '';
+    this.keyframes.clear();
+    this.kfPool = [];
+    this.job = null;
+    this.building = null;
+    this.shown = null;
     this.framesOutput = null;
-    this.f0 = this.f1 = this.fPrev = this.fNext = null;
+    this.framesRun = '';
+    this.lastKey = '';
   }
 
   dispose(): void {

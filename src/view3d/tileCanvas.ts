@@ -4,6 +4,7 @@
  *
  * - キャンバスの左上 = グリッド北西角、右下 = グリッド南東角（UV の v は北→南、flipY=false）
  * - 取得できなかった部分は透明のまま（シェーダ側で代替色に切り替える）
+ * - 範囲が同じなら（解像度だけ変えたとき）キャンバスは作り直さず、足りないタイルだけ addTiles で追加する
  */
 import { CanvasTexture, LinearFilter, LinearMipmapLinearFilter, SRGBColorSpace } from 'three';
 import { TILE_SIZE, type GridSpec } from '../core/geo';
@@ -34,6 +35,14 @@ export interface TileCanvasOptions {
 const MAX_CONCURRENT = 6;
 const UPDATE_INTERVAL_MS = 1000;
 
+/**
+ * 2つの格子が同じ範囲を覆うか（解像度だけが違う）。同じならタイルのキャンバスの大きさ・位置も同じなので使い回せる
+ * （キャンバスは spec.nx·cellPx × spec.ny·cellPx の範囲を、左上 = originPx/originPy に合わせて作る）。
+ */
+export function sameExtent(a: GridSpec, b: GridSpec): boolean {
+  return a.zoom === b.zoom && a.originPx === b.originPx && a.originPy === b.originPy && a.nx * a.cellPx === b.nx * b.cellPx && a.ny * a.cellPx === b.ny * b.cellPx;
+}
+
 export class TileCanvas {
   readonly canvas: HTMLCanvasElement;
   readonly texture: CanvasTexture;
@@ -46,6 +55,15 @@ export class TileCanvas {
   private updateTimer = 0;
   private lastUpdate = 0;
   private disposed = false;
+  /** キャンバス左上の全球ピクセル座標（this.zoom での値） */
+  private ox = 0;
+  private oy = 0;
+  /** 要求済みのタイル（'x/y'）と待ち行列 */
+  private readonly requested = new Set<string>();
+  private readonly queue: { x: number; y: number }[] = [];
+  private inflight = 0;
+  private loaded = 0;
+  private failed = 0;
 
   constructor(private readonly opts: TileCanvasOptions) {
     const { spec, source } = opts;
@@ -70,82 +88,100 @@ export class TileCanvas {
   }
 
   private start(scale: number): void {
-    const { spec, source, filter } = this.opts;
-    const ox = spec.originPx * scale;
-    const oy = spec.originPy * scale;
-    const x0 = Math.floor(ox / TILE_SIZE);
-    const y0 = Math.floor(oy / TILE_SIZE);
-    const x1 = Math.floor((ox + this.canvas.width - 1e-6) / TILE_SIZE);
-    const y1 = Math.floor((oy + this.canvas.height - 1e-6) / TILE_SIZE);
-    const queue: { x: number; y: number }[] = [];
+    const { spec } = this.opts;
+    this.ox = spec.originPx * scale;
+    this.oy = spec.originPy * scale;
+    const queued = this.enqueue(this.opts.filter);
+    // 判定の関数は地形の格子を参照しているので、使い終わったら手放す（解像度を変えてキャンバスを使い回すとき、前の格子を残さない）
+    this.opts.filter = undefined;
+    if (queued === 0) {
+      queueMicrotask(() => this.finish());
+      return;
+    }
+    this.pump();
+  }
+
+  /**
+   * まだ取得していないタイルのうち filter を満たすものを追加で取得する。
+   * 解像度を変えた（範囲は同じ）ときに、新しい格子で陸を含むようになったタイルを取得するのに使う。
+   */
+  addTiles(filter?: (x: number, y: number, z: number) => boolean): void {
+    if (this.disposed) return;
+    if (this.enqueue(filter) > 0) this.pump();
+  }
+
+  /** 範囲のタイルのうち、まだ要求していないものを待ち行列に入れる（中心に近い順）。入れた数を返す */
+  private enqueue(filter?: (x: number, y: number, z: number) => boolean): number {
+    const x0 = Math.floor(this.ox / TILE_SIZE);
+    const y0 = Math.floor(this.oy / TILE_SIZE);
+    const x1 = Math.floor((this.ox + this.canvas.width - 1e-6) / TILE_SIZE);
+    const y1 = Math.floor((this.oy + this.canvas.height - 1e-6) / TILE_SIZE);
+    const add: { x: number; y: number }[] = [];
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const key = `${x}/${y}`;
+        if (this.requested.has(key)) continue;
+        if (filter && !filter(x, y, this.zoom)) continue;
+        this.requested.add(key);
+        add.push({ x, y });
+      }
+    }
     // 中心に近いタイルから読む（見栄えのため）
     const cx = (x0 + x1) / 2;
     const cy = (y0 + y1) / 2;
-    for (let y = y0; y <= y1; y++) {
-      for (let x = x0; x <= x1; x++) {
-        if (filter && !filter(x, y, this.zoom)) continue;
-        queue.push({ x, y });
-      }
-    }
-    queue.sort((a, b) => Math.hypot(a.x - cx, a.y - cy) - Math.hypot(b.x - cx, b.y - cy));
-    const total = queue.length;
-    let loaded = 0;
-    let failed = 0;
-    let missing = 0;
-    let active = 0;
+    add.sort((a, b) => Math.hypot(a.x - cx, a.y - cy) - Math.hypot(b.x - cx, b.y - cy));
+    this.queue.push(...add);
+    return add.length;
+  }
 
-    const finish = () => {
-      if (this.disposed) return;
-      if (loaded > 0) this.status = failed > 0 ? 'partial' : 'ready';
-      else this.status = failed > 0 ? 'failed' : 'ready';
-      this.flush();
-      this.opts.onDone?.(this.status, loaded, failed);
-    };
+  private pump(): void {
+    while (!this.disposed && this.inflight < MAX_CONCURRENT && this.queue.length > 0) this.next();
+  }
 
-    const next = () => {
-      if (this.disposed) return;
-      if (queue.length === 0) {
-        if (active === 0) finish();
-        return;
-      }
-      const t = queue.shift()!;
-      active += 1;
-      const url = source.url.replace('{z}', String(this.zoom)).replace('{x}', String(t.x)).replace('{y}', String(t.y));
-      const exists = this.opts.exists;
-      (exists ? exists(t.x, t.y, this.zoom).catch(() => true) : Promise.resolve(true))
-        .then((ok) => (ok && !this.disposed ? this.loadTile(url) : null))
-        .then((bmp) => {
-          if (this.disposed) {
-            bmp?.close();
-            return;
-          }
-          if (bmp) {
-            this.ctx.drawImage(bmp, Math.round(t.x * TILE_SIZE - ox), Math.round(t.y * TILE_SIZE - oy), TILE_SIZE, TILE_SIZE);
-            bmp.close();
-            loaded += 1;
-            if (!this.hasContent) {
-              this.hasContent = true;
-              this.opts.onFirstContent?.();
-            }
-            this.scheduleUpdate();
-          } else {
-            missing += 1;
-          }
-        })
-        .catch(() => {
-          failed += 1;
-        })
-        .finally(() => {
-          active -= 1;
-          next();
-        });
-    };
-    if (total === 0) {
-      queueMicrotask(finish);
+  private finish(): void {
+    if (this.disposed) return;
+    if (this.loaded > 0) this.status = this.failed > 0 ? 'partial' : 'ready';
+    else this.status = this.failed > 0 ? 'failed' : 'ready';
+    this.flush();
+    this.opts.onDone?.(this.status, this.loaded, this.failed);
+  }
+
+  private next(): void {
+    if (this.disposed) return;
+    const t = this.queue.shift();
+    if (!t) {
+      if (this.inflight === 0) this.finish();
       return;
     }
-    for (let n = 0; n < Math.min(MAX_CONCURRENT, total); n++) next();
-    void missing;
+    this.inflight += 1;
+    const url = this.opts.source.url.replace('{z}', String(this.zoom)).replace('{x}', String(t.x)).replace('{y}', String(t.y));
+    const exists = this.opts.exists;
+    (exists ? exists(t.x, t.y, this.zoom).catch(() => true) : Promise.resolve(true))
+      .then((ok) => (ok && !this.disposed ? this.loadTile(url) : null))
+      .then((bmp) => {
+        if (this.disposed) {
+          bmp?.close();
+          return;
+        }
+        if (bmp) {
+          this.ctx.drawImage(bmp, Math.round(t.x * TILE_SIZE - this.ox), Math.round(t.y * TILE_SIZE - this.oy), TILE_SIZE, TILE_SIZE);
+          bmp.close();
+          this.loaded += 1;
+          if (!this.hasContent) {
+            this.hasContent = true;
+            this.opts.onFirstContent?.();
+          }
+          this.scheduleUpdate();
+        }
+      })
+      .catch(() => {
+        this.failed += 1;
+      })
+      .finally(() => {
+        this.inflight -= 1;
+        if (this.queue.length > 0) this.next();
+        else if (this.inflight === 0) this.finish();
+      });
   }
 
   /** 1タイルを取得してデコード。404 等（タイルが存在しない）は null、通信失敗は例外 */

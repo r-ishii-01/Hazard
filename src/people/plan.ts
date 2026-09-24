@@ -7,15 +7,20 @@
  *     シミュレーション結果がある場合 … 一度も浸水せず、海・浸水域から SAFE_BUFFER_M 以上離れた陸。
  *     （計算途中の結果しかない場合は、下記の標高条件も同時に満たすセルに限る＝安全側）
  *     結果がない場合 … 標高 ≥ 海岸での津波高（T.P.。潮位を含む値）+ HIGHGROUND_MARGIN_M の陸。
+ *     さらに、公式の津波浸水想定（神奈川県）の区域と、その周囲 OFFICIAL_ZONE_BUFFER_M 以内のセルは除く
+ *     （このサイトの計算は公式の想定より浸水が狭く浅めなので、計算だけで「浸水しない高台」とは示さない）。
+ *     公式の想定を読み込めていない場合は除けないので、その旨を避難先の名前に示す。
  *   安全なセルに到達できない場合は、近く（経路コスト FALLBACK_SEARCH_M 以内）で最も高い地点を目指す。
  *
  * 【モデル上の近似】道路網・建物・信号・混雑は考慮せず、陸はどこでも一定速度で歩けるとする。
  * 経路は地形グリッド上の最短経路で、実際の避難路とは異なる。公的な避難計画ではない。
  */
 import { gridXYToLonLat, lonLatToGridXY } from '../core/geo';
-import type { EvacPlan, Person, PathPoint, Shelter, ShelterKind, SimOutput, SimParams, TerrainGrid } from '../core/types';
+import type { EvacPlan, OfficialInundationState, Person, PathPoint, Shelter, ShelterKind, SimOutput, SimParams, TerrainGrid } from '../core/types';
+import { officialCellCodes } from '../data/officialHazard';
 import {
   HIGHGROUND_MARGIN_M,
+  excludeOfficialZone,
   MIN_START_LAND_AREA_M2,
   PASS_LAND,
   PASS_WATER_CROSS,
@@ -69,6 +74,8 @@ interface GoalInfo {
   lat?: number;
   /** 「安全」とした根拠の短い説明（高台のときのみ。現在地がすでに安全な場合の表示に使う） */
   basis?: string;
+  /** 根拠の補足（公式の浸水想定を確かめられなかったことなど。名前の末尾に添える） */
+  note?: string;
 }
 
 interface Goal {
@@ -89,34 +96,66 @@ export function simCoversMainWave(output: SimOutput, params: SimParams): boolean
   return output.durationSec >= (arrival + period) * 60 - 1e-6;
 }
 
+/** 公式の津波浸水想定を「最寄りの高台」の判定に使えるか。使えなければ、その理由（避難先の名前に添える） */
+function officialCodesFor(ctx: GridContext, official: OfficialInundationState | null | undefined): { codes: Uint8Array | null; note: string } {
+  if (official?.status === 'ready' && official.data) {
+    try {
+      return { codes: officialCellCodes(official.data, ctx.grid.spec), note: '' };
+    } catch (e) {
+      console.warn('[people] 公式の浸水想定をセルに対応づけられませんでした', e);
+    }
+  }
+  const why =
+    !official || official.status === 'error' || official.status === 'ready'
+      ? '公式の津波浸水想定を読み込めなかったため、公式の浸水想定区域の外かは未確認'
+      : '公式の津波浸水想定を読み込み中のため、公式の浸水想定区域の外かは未確認';
+  return { codes: null, note: why };
+}
+
 /** 'highground' の目標（安全なセル）を作る */
-function highgroundGoal(ctx: GridContext, output: SimOutput | null, params: SimParams, prefix = ''): Goal {
+function highgroundGoal(
+  ctx: GridContext,
+  output: SimOutput | null,
+  params: SimParams,
+  official: OfficialInundationState | null | undefined,
+  prefix = '',
+): Goal {
   // coastHeight は海岸での最大水位 [m, T.P.] で、すでに潮位を含む（公的な「最大津波高」と同じ定義）。
   // ここで潮位を足すと二重計上になる。
   const coast = Number.isFinite(params.scenario.coastHeight) ? params.scenario.coastHeight : 10;
   const threshold = coast + HIGHGROUND_MARGIN_M;
   const z = ctx.grid.z;
+  const off = officialCodesFor(ctx, official);
+  // 公式の想定の区域（と周囲）を除く。読み込めていなければ除けないので、名前にその旨を添える
+  const outside = (mask: Uint8Array) => (off.codes ? excludeOfficialZone(ctx, mask, off.codes) : mask);
+  const offBasis = off.codes ? '公式の浸水想定区域の外' : '';
+  const note = off.codes ? undefined : off.note;
+  const tail = note ? `。${note}` : '';
+  const join = (...parts: string[]) => parts.filter(Boolean).join('・');
   const usable = output && output.framesReady() > 0 && outputMatchesGrid(ctx, output) ? output : null;
   if (usable) {
     const complete = outputComplete(usable);
     if (complete && simCoversMainWave(usable, params)) {
-      const basis = '計算で浸水しなかった地点';
+      const simBasis = off.codes ? '計算でも浸水なし' : '計算で浸水しなかった地点';
+      const basis = join(offBasis, simBasis);
       return {
-        mask: simSafeMask(ctx, usable),
-        describe: (k) => ({ name: `${prefix}最寄りの高台（${basis}・標高 ${z[k].toFixed(1)} m）`, kind: 'highground', basis }),
+        mask: outside(simSafeMask(ctx, usable)),
+        describe: (k) => ({ name: `${prefix}最寄りの高台（${join(offBasis, simBasis, `標高 ${z[k].toFixed(1)} m`)}${tail}）`, kind: 'highground', basis, note }),
       };
     }
     // 計算途中・計算時間が短い: まだ浸水していないだけの場所を選ばないよう、標高条件と両方を満たすセルに限る
-    const basis = complete ? '計算時間が最大波の到達を十分に含まないため標高でも判定' : '計算途中の結果で浸水なし';
+    const simBasis = complete ? '計算時間が最大波の到達を十分に含まないため標高でも判定' : '計算途中の結果で浸水なし';
+    const basis = join(offBasis, simBasis);
     return {
-      mask: simAndHeightSafeMask(ctx, usable, threshold),
-      describe: (k) => ({ name: `${prefix}最寄りの高台（標高 ${z[k].toFixed(1)} m・${basis}）`, kind: 'highground', basis }),
+      mask: outside(simAndHeightSafeMask(ctx, usable, threshold)),
+      describe: (k) => ({ name: `${prefix}最寄りの高台（${join(offBasis, `標高 ${z[k].toFixed(1)} m`, simBasis)}${tail}）`, kind: 'highground', basis, note }),
     };
   }
-  const basis = `想定津波高 T.P.${coast.toFixed(1)} m + ${HIGHGROUND_MARGIN_M} m 以上`;
+  const hBasis = `想定津波高 T.P.${coast.toFixed(1)} m + ${HIGHGROUND_MARGIN_M} m 以上`;
+  const basis = join(offBasis, hBasis);
   return {
-    mask: heightSafeMask(ctx, threshold),
-    describe: (k) => ({ name: `${prefix}最寄りの高台（標高 ${z[k].toFixed(1)} m・${basis}）`, kind: 'highground', basis }),
+    mask: outside(heightSafeMask(ctx, threshold)),
+    describe: (k) => ({ name: `${prefix}最寄りの高台（${join(offBasis, `標高 ${z[k].toFixed(1)} m`, hBasis)}${tail}）`, kind: 'highground', basis, note }),
   };
 }
 
@@ -129,6 +168,8 @@ function findNearest(ctx: GridContext, model: CostModel, start: number, mask: Ui
 
 /**
  * 避難計画を作る。所要時間はおおむね標準解像度（352×394）で数ms〜20ms程度。
+ * official: 公式の津波浸水想定（AppState.officialInundation）。最寄りの高台から公式の浸水想定区域を除くのに使う。
+ * 省略・読み込み前・失敗のときは除けないので、高台の名前に「公式の浸水想定区域の外かは未確認」と示す。
  */
 export function planEvacuation(
   person: Person,
@@ -136,6 +177,7 @@ export function planEvacuation(
   shelters: Shelter[],
   output: SimOutput | null,
   params: SimParams,
+  official?: OfficialInundationState | null,
 ): EvacPlan {
   if (person.evacMode === 'stay' || !grid) return stayPlan(person);
   const ctx = getGridContext(grid);
@@ -170,16 +212,16 @@ export function planEvacuation(
         },
       };
     } else {
-      goal = highgroundGoal(ctx, output, params, '避難場所データがないため');
+      goal = highgroundGoal(ctx, output, params, official, '避難場所データがないため');
     }
   } else {
-    goal = highgroundGoal(ctx, output, params);
+    goal = highgroundGoal(ctx, output, params, official);
   }
 
   let found = findNearest(ctx, model, startCell, goal.mask);
   if (!found && person.evacMode === 'shelter') {
     // 避難場所に到達できない（川や海で隔てられている等）→ 高台へ
-    goal = highgroundGoal(ctx, output, params, '避難場所に到達できないため');
+    goal = highgroundGoal(ctx, output, params, official, '避難場所に到達できないため');
     found = findNearest(ctx, model, startCell, goal.mask);
   }
 
@@ -214,7 +256,7 @@ export function planEvacuation(
       target: {
         lon: person.lon,
         lat: person.lat,
-        name: `現在地（${info.basis ?? '安全とみなす高台'}・標高 ${grid.z[startCell].toFixed(1)} m）`,
+        name: `現在地（${info.basis ?? '安全とみなす高台'}・標高 ${grid.z[startCell].toFixed(1)} m${info.note ? `。${info.note}` : ''}）`,
         kind: info.kind,
       },
       arriveAt: 0,

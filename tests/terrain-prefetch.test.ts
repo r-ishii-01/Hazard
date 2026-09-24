@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createGridSpec, DOMAIN_BOUNDS } from '../src/core/geo';
 import { gsiTileUrl } from '../src/terrain/gsiDem';
 import { listRequiredDemTiles } from '../src/terrain/tiles';
+import { officialHazardTiles, officialRemoteUrl, officialTileKey } from '../src/data/officialHazard';
 
 interface Tile {
   layer: string;
@@ -12,7 +13,10 @@ interface Tile {
 interface PrefetchModule {
   readDomainBounds(): typeof DOMAIN_BOUNDS;
   listTiles(bounds?: typeof DOMAIN_BOUNDS): Tile[];
+  listHazardTiles(bounds?: typeof DOMAIN_BOUNDS): Tile[];
+  listAllTiles(bounds?: typeof DOMAIN_BOUNDS, only?: 'dem' | 'hazard'): Tile[];
   tileUrl(t: Tile): string;
+  tileKey(t: Tile): string;
   main(argv: string[]): Promise<number>;
 }
 
@@ -45,20 +49,40 @@ describe('scripts/prefetch-dem.mjs', () => {
     }
   });
 
+  it('lists the official tsunami inundation tiles (z15) that src/data/officialHazard.ts reads from the mirror', async () => {
+    const mod = await load();
+    const tiles = mod.listHazardTiles();
+    const want = officialHazardTiles();
+    expect(tiles.length).toBe(want.length);
+    expect(tiles.map((t) => mod.tileKey(t))).toEqual(want.map((t) => officialTileKey(t)));
+    expect(tiles.map((t) => mod.tileUrl(t))).toEqual(want.map((t) => officialRemoteUrl(t)));
+    expect(mod.listAllTiles(undefined, 'dem').length).toBe(listRequiredDemTiles().length);
+    expect(mod.listAllTiles(undefined, 'hazard').length).toBe(want.length);
+  });
+
   it('--dry-run prints the URL list without downloading', async () => {
     const mod = await load();
     const lines: string[] = [];
     const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => void lines.push(String(m)));
     const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const dem = listRequiredDemTiles().length;
+    const hazard = officialHazardTiles().length;
     try {
       expect(await mod.main(['--dry-run'])).toBe(0);
-      expect(lines.length).toBe(listRequiredDemTiles().length);
-      expect(lines.every((l) => l.startsWith('https://cyberjapandata.gsi.go.jp/xyz/'))).toBe(true);
+      expect(lines.length).toBe(dem + hazard);
+      expect(lines.filter((l) => l.startsWith('https://cyberjapandata.gsi.go.jp/xyz/')).length).toBe(dem);
+      expect(lines.filter((l) => l.startsWith('https://disaportaldata.gsi.go.jp/raster/04_tsunami_newlegend_data/15/')).length).toBe(hazard);
+      lines.length = 0;
+      expect(await mod.main(['--dry-run', '--only', 'dem'])).toBe(0);
+      expect(lines.length).toBe(dem);
+      lines.length = 0;
+      expect(await mod.main(['--dry-run', '--only', 'hazard'])).toBe(0);
+      expect(lines.length).toBe(hazard);
       lines.length = 0;
       expect(await mod.main(['--dry-run', '--json'])).toBe(0);
       const json = JSON.parse(lines.join('\n')) as { tiles: Tile[] };
-      expect(json.tiles.length).toBe(listRequiredDemTiles().length);
+      expect(json.tiles.length).toBe(dem + hazard);
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       log.mockRestore();
@@ -70,5 +94,6 @@ describe('scripts/prefetch-dem.mjs', () => {
   it('rejects unknown options', async () => {
     const mod = await load();
     await expect(mod.main(['--no-such-option'])).rejects.toThrow('不明なオプション');
+    await expect(mod.main(['--only', 'relief'])).rejects.toThrow('--only');
   });
 });

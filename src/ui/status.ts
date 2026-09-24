@@ -3,8 +3,9 @@
  * people モジュールが公開する PERSON_STATUS_INFO（表示名・色）と DEPTH_THRESHOLDS（浸水深の区分・説明・出典）を
  * 優先して使い、地図上の表示と揃える。形式が変わっても壊れないよう防御的に読む。
  */
-import type { PersonStatus } from '../core/types';
+import type { Person, PersonStatus } from '../core/types';
 import * as peopleModule from '../people';
+import { STAY_STATUS_LABEL } from '../people';
 import { formatDepth, isSafeColor } from './format';
 import { normalizeThresholds } from './series';
 import type { IconName } from './icons';
@@ -82,6 +83,16 @@ export function statusMeta(status: PersonStatus): StatusMeta {
   const color = entry && isSafeColor(entry.color) ? entry.color : base.color;
   const label = entry && typeof entry.label === 'string' && entry.label ? entry.label : base.label;
   return { ...base, color, label };
+}
+
+/**
+ * 人物ごとの状態の見た目。「その場にとどまる」人で浸水していない間は、「避難開始前」ではなく
+ * 「とどまっている」と示す（people の personStatusLabel と同じ）。
+ */
+export function personStatusMeta(status: PersonStatus, person?: Pick<Person, 'evacMode'> | null): StatusMeta {
+  const meta = statusMeta(status);
+  if (status === 'waiting' && person?.evacMode === 'stay') return { ...meta, label: STAY_STATUS_LABEL, icon: 'pin' };
+  return meta;
 }
 
 /** 状態の説明文（凡例用）。浸水の区分は people の説明文を優先する */

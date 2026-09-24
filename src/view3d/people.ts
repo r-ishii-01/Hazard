@@ -20,7 +20,8 @@ import {
   type Camera,
 } from 'three';
 import { CELL_SEA, type EvacPlan, type Person, type PersonKind, type PersonState, type PersonStatus, type SimOutput, type TerrainGrid } from '../core/types';
-import { PERSON_PROFILES, PERSON_STATUS_INFO, personStateAt } from '../people';
+import { formatDepth } from '../core/format';
+import { PERSON_PROFILES, PERSON_STATUS_INFO, STAY_STATUS_LABEL, personStateAt, personStatusLabel } from '../people';
 import { createFigureGeometry } from './figures';
 import { LabelSprite } from './labels';
 import type { HeightSampler } from './sampler';
@@ -210,6 +211,18 @@ export class PeopleLayer {
     for (const [id, e] of this.entries) if (!seen.has(id)) this.remove(e);
   }
 
+  /**
+   * 避難計画への参照を手放す（3D を表示していない間に新しい計算が始まったとき）。
+   * 計画は計算結果と結びついたデータ（people の状態判定のキャッシュ）から参照されるので、
+   * 古い計画を持ち続けると古い計算結果もメモリに残る。次の sync で今の計画から作り直す。
+   */
+  releasePlans(): void {
+    for (const e of this.entries.values()) {
+      e.plan = undefined;
+      this.disposeRoute(e);
+    }
+  }
+
   /** 地形が変わったら経路を作り直す */
   rebuildRoutes(sampler: HeightSampler | null): void {
     for (const e of this.entries.values()) {
@@ -391,7 +404,7 @@ export class PeopleLayer {
       let ground = c.sampler.heightMesh(q.x, q.z);
       const k = c.sampler.cellIndex(q.x, q.z);
       if (k >= 0 && c.grid.kind[k] === CELL_SEA) ground = Math.max(ground, 1.5);
-      const depth = Number.isFinite(st.depth) && st.depth > 0.01 ? st.depth : 0;
+      const depth = Number.isFinite(st.depth) && st.depth >= 0.01 ? st.depth : 0;
       // 浸水表示を消しているときは沈めない（水が描かれていないため）
       const shownDepth = c.showFlood ? depth : 0;
       let surface = ground + shownDepth;
@@ -426,13 +439,13 @@ export class PeopleLayer {
       e.top.set(q.x, Math.max(headY, ringY) + 0.25 * S, q.z);
       e.label.sprite.position.copy(e.top);
       e.label.fit(c.viewportH, c.p11);
-      const depthText = depth > 0 ? `浸水 ${depth < 0.1 ? depth.toFixed(2) : depth.toFixed(1)} m` : '浸水なし';
-      const statusText = STATUS_LABELS[st.status] ?? st.status;
+      const depthText = depth > 0 ? `浸水 ${formatDepth(depth)}` : '浸水なし';
+      // 表示名は「人物」タブの一覧・凡例と同じ（「その場にとどまる」人は「とどまっている」）
+      const statusText = personStatusLabel(e.person, st.status);
+      const shortText = statusText === STAY_STATUS_LABEL ? statusText : (STATUS_SHORT[st.status] ?? statusText);
       e.label.set({
         title: e.person.name,
-        line2: selected
-          ? `${statusText}・${depthText}`
-          : `${STATUS_SHORT[st.status] ?? statusText}${depth > 0 ? `・${depth < 0.1 ? depth.toFixed(2) : depth.toFixed(1)}m` : ''}`,
+        line2: selected ? `${statusText}・${depthText}` : `${shortText}${depth > 0 ? `・${formatDepth(depth)}` : ''}`,
         accent: STATUS_COLORS[st.status] ?? STATUS_COLORS.waiting,
         selected,
         compact: !selected,
@@ -544,8 +557,8 @@ export class PeopleLayer {
     const label = PERSON_PROFILES[e.person.kind]?.label ?? e.person.kind;
     const lines = [`${e.person.name}（${label}）`];
     if (st) {
-      const status = STATUS_LABELS[st.status] ?? st.status;
-      const depth = st.depth > 0.01 ? `浸水 ${st.depth.toFixed(2)} m` : '浸水なし';
+      const status = personStatusLabel(e.person, st.status);
+      const depth = st.depth >= 0.01 ? `浸水 ${formatDepth(st.depth)}` : '浸水なし';
       lines.push(`${status}・${depth}`);
       if (st.message && st.message !== status) lines.push(st.message);
     }

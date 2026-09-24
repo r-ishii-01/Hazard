@@ -4,7 +4,7 @@
  * 数値はいずれも公的資料の「目安」や被害想定の「仮定」であり、個人の実際の行動や
  * 生死を予測するものではない。出典 URL を各定数のコメントに記す。
  */
-import type { PersonKind, PersonStatus } from '../core/types';
+import type { Person, PersonKind, PersonStatus } from '../core/types';
 
 // ---------------------------------------------------------------------------
 // 出典
@@ -17,31 +17,36 @@ import type { PersonKind, PersonStatus } from '../core/types';
  *  ことを考慮する必要がある」
  * （指針は高齢者一般を 0.5m/秒 とはしていない。1.0m/秒 は「老人自由歩行速度」も踏まえた値）
  * また避難困難地域の検討では「歩行速度1m/秒、地震発生から避難開始まで2分、避難可能距離500m」を目安とする。
- * - 平成25年3月版: https://www.fdma.go.jp/neuter/about/shingi_kento/h24/tsunami_hinan/houkokusho/p02.pdf
  * - 令和7年3月改訂版: https://www.fdma.go.jp/laws/tutatsu/items/tuchi2503/pdf/250311_sai_1-2.pdf
+ *   （平成25年3月版の以前の URL …/shingi_kento/h24/tsunami_hinan/houkokusho/p02.pdf は 404 になった）
  */
 export const FDMA_GUIDELINE_URL = 'https://www.fdma.go.jp/laws/tutatsu/items/tuchi2503/pdf/250311_sai_1-2.pdf';
 export const FDMA_GUIDELINE_LABEL = '消防庁「市町村における津波避難計画策定指針」';
 
 /**
- * 内閣府「南海トラフの巨大地震 建物被害・人的被害の被害想定項目及び手法の概要」（平成24年8月）。
- * - 避難開始: 直接避難者は発災5分後、用事後避難者は15分後、切迫避難者は津波到達後（昼間）。
- *   夜間はさらに5分準備に時間がかかり、避難速度は昼間の80%とする。
- * - 避難速度: 東日本大震災の実績から平均 2.65 km/h（約0.74 m/s）。夜間は北海道南西沖地震の実績から昼間の80%。
+ * 内閣府「南海トラフの巨大地震 建物被害・人的被害の被害想定項目及び手法の概要」（平成24年8月29日。全33頁の PDF）。
+ * - 避難開始（PDF p.20）: 昼間の発災では、直接避難者は発災5分後、用事後避難者は15分後、切迫避難者は津波到達後。
+ *   夜間は昼間よりさらに5分準備に時間がかかり、避難速度も昼間の80%に低下すると仮定する（同頁）。
+ * - 避難速度（PDF p.20）: 東日本大震災の実績から平均時速 2.65 km/h（約0.74 m/s）。
  *   （令和元年6月の再計算資料にも同じ記載: CAO_NANKAI_2019_URL）
- * - 津波に巻き込まれた場合の死者率: 越村ほか（2009）の浸水深別死者率を参考に、
- *   浸水深30cm以上で死者が発生し始め、浸水深1mでは巻き込まれた人全員が死亡すると仮定。
- * https://www.bousai.go.jp/jishin/nankai/taisaku/pdf/2_2.pdf
+ * - 津波に巻き込まれた場合の死者率（PDF p.22）: 越村ほか（2009）の浸水深別死者率を参考に、
+ *   「浸水深30cm以上で死者が発生し始め、浸水深1mでは津波に巻き込まれた人のすべてが死亡すると仮定した関数」。
+ * https://www.bousai.go.jp/jishin/nankai/taisaku_wg/pdf/20120829_gaiyou.pdf （2026-09-24 に内容を確認）
+ * （以前の URL https://www.bousai.go.jp/jishin/nankai/taisaku/pdf/2_2.pdf は 404 になった）
  * （同手法を用いた自治体資料の例: https://www.pref.osaka.lg.jp/documents/2473/5_shiryou_3.pdf ）
  */
-export const CAO_NANKAI_METHOD_URL = 'https://www.bousai.go.jp/jishin/nankai/taisaku/pdf/2_2.pdf';
+export const CAO_NANKAI_METHOD_URL = 'https://www.bousai.go.jp/jishin/nankai/taisaku_wg/pdf/20120829_gaiyou.pdf';
 /** 内閣府「南海トラフ巨大地震の被害想定について（建物被害・人的被害）」令和元年6月（避難速度 2.65km/h の記載） */
 export const CAO_NANKAI_2019_URL = 'https://www.bousai.go.jp/jishin/nankai/taisaku_wg/pdf/1_sanko2.pdf';
 export const CAO_NANKAI_METHOD_LABEL = '内閣府「南海トラフの巨大地震 建物被害・人的被害の被害想定項目及び手法の概要」';
 
 /**
  * 国土交通省「川の防災情報」浸水深と避難行動について（河川の氾濫を想定した解説）。
- * 「流速が速い場合は、20cm程度でも歩行が困難になる」「浸水深が50cmを上回る場合の避難行動は危険」。
+ * ページの本文には「水深が膝程度あると大人でも歩くのが困難になります」「浸水深が膝（0.5ｍ）の高さ以上になると、
+ * ほとんどの人が避難困難」（関川水害の調査）とあり、図（images/05_01.jpg。「洪水ハザードマップ作成の手引き（改訂版）」より）に
+ * 「浸水深が0.5m（大人の膝）程度では氾濫流速が0.7m/s程度でも避難は困難となる」と、水中を歩ける範囲
+ * （流れが速いほど浅い深さでも歩けなくなる）のグラフがある（2026-09-24 に確認）。
+ * 「20cm程度でも歩行困難」という記載はこのページには無い（図から読み取れるだけ）ので、その表現では引用しない。
  * https://city.river.go.jp/kawabou/reference/index05.html
  */
 export const MLIT_DEPTH_WALKING_URL = 'https://city.river.go.jp/kawabou/reference/index05.html';
@@ -217,7 +222,8 @@ export const DEPTH_THRESHOLDS: readonly DepthThreshold[] = [
     status: 'caution',
     minDepth: DEPTH_CAUTION_M,
     label: '浸水（注意）',
-    description: '足元が浸水している状態。国土交通省の解説（河川の氾濫）では、流れが速いと20cm程度でも歩行が困難になるとされています。',
+    description:
+      '足元が浸水している状態。国土交通省の解説（河川の氾濫）では、膝（0.5m）程度の浸水で流れが0.7m/s程度でも避難が困難になるとされ、流れが速いほど浅い深さでも歩けなくなることが図で示されています。津波の流れは速いので、浅くても危険です。',
     source: '国土交通省「川の防災情報」浸水深と避難行動について',
     sourceUrl: MLIT_DEPTH_WALKING_URL,
   },
@@ -259,3 +265,21 @@ export const PERSON_STATUS_INFO: Record<PersonStatus, { label: string; color: st
   danger: { label: '歩行困難（危険）', color: '#ea580c' },
   critical: { label: '生命の危険', color: '#b91c1c' },
 };
+
+/**
+ * 「その場にとどまる」を選んだ人の、浸水していない間の表示名。
+ * 状態（PersonStatus）は 'waiting' のままだが、「避難開始前」と示すと、これから避難を始めるように読めるため。
+ */
+export const STAY_STATUS_LABEL = 'とどまっている';
+
+/** 「その場にとどまる」人の説明（凡例用） */
+export const STAY_STATUS_DESCRIPTION = '「その場にとどまる」を選んだ人（移動しない想定。浸水したら浸水の状態で示す）';
+
+/**
+ * 人物の状態の表示名（地図・一覧・詳細で共通に使う）。
+ * 「その場にとどまる」人で浸水していない間（status が 'waiting'）は STAY_STATUS_LABEL。
+ */
+export function personStatusLabel(person: Pick<Person, 'evacMode'> | null | undefined, status: PersonStatus): string {
+  if (status === 'waiting' && person?.evacMode === 'stay') return STAY_STATUS_LABEL;
+  return PERSON_STATUS_INFO[status]?.label ?? PERSON_STATUS_INFO.waiting.label;
+}

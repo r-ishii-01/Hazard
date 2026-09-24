@@ -41,6 +41,24 @@ const CSS = `
 .m2d-toast.m2d-show { opacity: 1; }
 .m2d-hint[hidden] { display: none; }
 
+/* タイル（背景地図など）を取得できないときの案内（取得できるようになるまで出したまま） */
+.m2d-notice {
+  position: absolute; left: 50%; top: 10px; transform: translateX(-50%); z-index: 4; box-sizing: border-box;
+  width: max-content; max-width: min(560px, calc(100% - 110px)); display: flex; align-items: center; gap: 8px;
+  padding: 6px 6px 6px 12px; border-radius: 10px; border: 1px solid #fdba74; background: #fff7ed; color: #7c2d12;
+  box-shadow: 0 1px 4px rgba(15,23,42,.25); font-size: 12.5px; line-height: 1.45; pointer-events: auto;
+}
+.m2d-notice[hidden] { display: none; }
+.m2d-notice__retry {
+  flex: none; font: inherit; font-size: 12px; font-weight: 600; line-height: 1.2; color: #fff; background: #9a3412;
+  border: 0; border-radius: 999px; padding: 6px 12px; cursor: pointer;
+}
+.m2d-notice__retry:hover { background: #7c2d12; }
+.m2d-notice__retry:focus-visible { outline: 2px solid #0ea5e9; outline-offset: 2px; }
+@media (max-width: 520px) {
+  .m2d-notice { left: 8px; transform: none; max-width: calc(100% - 64px); }
+}
+
 /* 計算範囲ラベル */
 .m2d-domain-label {
   pointer-events: none; font-size: 11px; font-weight: 600; color: #1e293b; white-space: nowrap;
@@ -87,7 +105,7 @@ const CSS = `
 .m2d-person__disc svg { width: 24px; height: 24px; display: block; }
 .m2d-person__badge {
   position: absolute; right: -5px; top: -5px; width: 17px; height: 17px; border-radius: 50%; box-sizing: border-box;
-  background: var(--m2d-ring, #64748b); border: 1.5px solid #fff; color: #fff; display: grid; place-items: center;
+  background: var(--m2d-ring, #64748b); border: 1.5px solid #fff; color: var(--m2d-ink, #fff); display: grid; place-items: center;
 }
 .m2d-person__badge svg { width: 13px; height: 13px; display: block; }
 .m2d-person__label {
@@ -95,7 +113,7 @@ const CSS = `
   font-size: 11px; line-height: 1.35; color: #0f172a; background: rgba(255,255,255,.93); border-radius: 4px;
   padding: 0 4px; box-shadow: 0 0 0 1px rgba(15,23,42,.18);
 }
-.m2d-person__depth { display: inline-block; margin-left: 3px; padding: 0 4px; border-radius: 3px; color: #fff; background: var(--m2d-ring, #64748b); font-weight: 700; }
+.m2d-person__depth { display: inline-block; margin-left: 3px; padding: 0 4px; border-radius: 3px; color: var(--m2d-ink, #fff); background: var(--m2d-ring, #64748b); font-weight: 700; }
 .m2d-person--selected { z-index: 3; }
 .m2d-person--selected .m2d-person__disc { transform: scale(1.18); box-shadow: 0 0 0 3px #fff, 0 0 0 6px #facc15, 0 2px 6px rgba(0,0,0,.5); }
 .m2d-person--selected .m2d-person__label { font-weight: 700; box-shadow: 0 0 0 1.5px #ca8a04; }
@@ -135,6 +153,24 @@ const CSS = `
   animation: m2d-userloc 1.8s ease-out infinite;
 }
 @keyframes m2d-userloc { from { transform: scale(.8); opacity: .8; } to { transform: scale(2.2); opacity: 0; } }
+
+/*
+ * 狭い画面・タッチ操作: 指で押しやすい大きさに（40px 以上。見た目の大きさが変わらない印は押せる範囲だけ広げる）。
+ * ズームのボタンの高さは、下の「場所を探す」ボタンと重ならない範囲で最大 40px（index.ts の fitControls が --m2d-zoom-h を設定）。
+ */
+@media (max-width: 819.98px), (pointer: coarse) {
+  .m2d-root .maplibregl-ctrl-top-right .maplibregl-ctrl { margin: 8px 8px 0 0; }
+  .m2d-root .maplibregl-ctrl-group button { width: 40px; height: var(--m2d-zoom-h, 29px); }
+  /* 出典の開閉ボタン（右下）。上端は、下中央の状態表示（HUD、下から 34px）より下に収める */
+  .m2d-root .maplibregl-ctrl-bottom-right > .maplibregl-ctrl-attrib.maplibregl-compact { margin: 0 6px 2px 0; min-height: 28px; padding-right: 32px; border-radius: 16px; }
+  .m2d-root .maplibregl-ctrl-bottom-right > .maplibregl-ctrl-attrib.maplibregl-compact-show { padding-right: 36px; }
+  .m2d-root .maplibregl-ctrl-attrib-button { width: 32px; height: 32px; border-radius: 16px; background-position: center; background-repeat: no-repeat; }
+  .m2d-shelter { width: 40px; height: 40px; display: grid; place-items: center; }
+  .m2d-person::before { content: ""; position: absolute; inset: -4px; border-radius: 50%; }
+  .m2d-hint__done { min-height: 40px; padding: 8px 14px; }
+  .m2d-notice__retry { min-height: 40px; padding: 8px 14px; }
+  .m2d-search__close { width: 40px; height: 40px; margin: -9px -8px -9px -4px; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .m2d-userloc__dot::after { animation: none; }

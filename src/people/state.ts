@@ -8,6 +8,7 @@
  *
  * 状態・浸水深はいずれもモデルによる計算上の値で、個人の実際の被害を予測するものではない。
  */
+import { formatDepth, formatElapsed } from '../core/format';
 import { lonLatToCell } from '../core/geo';
 import { CELL_LAND, type EvacPlan, type Person, type PersonState, type PersonStatus, type SimOutput, type TerrainGrid } from '../core/types';
 import { getGridContext, nearestLand } from './gridctx';
@@ -15,20 +16,10 @@ import { departureSec, personSpeed } from './plan';
 import { DEPTH_CAUTION_M, DEPTH_CRITICAL_M, classifyDepth } from './profiles';
 
 // ---------------------------------------------------------------------------
-// 表示用の書式
+// 表示用の書式（経過時間・浸水深は画面の他の表示と同じ書式: core/format.ts）
 // ---------------------------------------------------------------------------
 
-/** 秒 → 「m分ss秒」 */
-export function formatElapsed(sec: number): string {
-  const s = Math.max(0, Math.round(sec));
-  const m = Math.floor(s / 60);
-  return `${m}分${String(s % 60).padStart(2, '0')}秒`;
-}
-
-/** 浸水深 [m] → 「0.6 m」（10cm 未満は cm 単位の精度で表示） */
-export function formatDepth(depth: number): string {
-  return `${depth < 0.1 ? depth.toFixed(2) : depth.toFixed(1)} m`;
-}
+export { formatDepth, formatElapsed };
 
 function formatDistance(m: number): string {
   return m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m / 10) * 10} m`;

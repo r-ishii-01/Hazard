@@ -188,6 +188,25 @@
   display: none;
 }
 
+/* 1 行にたたんだ警報カード（広い画面で出てからしばらく後・押してたたんだとき。hud.ts） */
+.hud-warn.is-compact {
+  align-items: center;
+  padding-block: 6px;
+}
+
+.hud-warn.is-compact > .icon {
+  margin-top: 0;
+}
+
+.hud-warn.is-compact .hud-warn-label {
+  white-space: nowrap;
+}
+
+.hud-warn.is-compact .hud-warn-action,
+.hud-warn.is-compact .hud-warn-sub {
+  display: none;
+}
+
 @keyframes hud-in {
   from {
     opacity: 0;
@@ -270,6 +289,7 @@
   background: rgb(15 27 45 / 0.08);
 }
 
+
 .hud-sim {
   color: var(--ocean-800);
 }
@@ -293,6 +313,37 @@
   background: #fff8e6;
   border-color: var(--warn-border);
   color: var(--warn);
+}
+
+/* 表示中の結果が前の条件のもの・途中までのもの */
+.hud-result {
+  background: #fff8e6;
+  border-color: var(--warn-border);
+  color: var(--warn);
+}
+
+.hud-result .hud-chip-btn:hover {
+  background: rgb(180 83 9 / 0.1);
+}
+
+/* 狭い画面で人物を置いた後の知らせ（mapTools.ts） */
+.hud-toast {
+  background: var(--ok-bg);
+  border-color: var(--ok-border);
+  color: var(--ok);
+  pointer-events: auto;
+  animation: hud-in 200ms var(--ease);
+}
+
+.hud-toast .hud-chip-btn:hover {
+  background: rgb(22 101 52 / 0.1);
+}
+
+.hud-chip-close {
+  width: 26px;
+  padding: 0;
+  justify-content: center;
+  border-color: transparent;
 }
 
 .hud-placing {
@@ -447,6 +498,31 @@
 }
 
 .hud-legend-note[hidden] {
+  display: none;
+}
+
+/* 公式ハザードマップを読み込めないとき（狭い画面でも表示する） */
+.hud-legend-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  margin: 2px 0 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-s);
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.hud-legend-warn > .icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+.hud-legend-warn[hidden] {
   display: none;
 }
 
@@ -622,7 +698,7 @@
   }
 
   .hud-legend-toggle {
-    min-height: 30px;
+    min-height: 40px;
     padding: 3px 8px;
     font-size: 11.5px;
   }
@@ -643,5 +719,29 @@
 
   .hud-legend-note {
     display: none;
+  }
+}
+
+/*
+ * タッチ操作・狭い画面: 指で押しやすい大きさに（40px 以上）。チップの中のボタンは見た目の大きさを変えずに、
+ * 押せる範囲を上下に広げる（上の規則より後に置く）。
+ */
+@media (max-width: 819.98px), (pointer: coarse) {
+  .hud-chip-btn {
+    position: relative;
+  }
+
+  .hud-chip-btn::before {
+    content: "";
+    position: absolute;
+    inset: -8px -4px;
+  }
+
+  .hud-legend-toggle {
+    min-height: 40px;
+  }
+
+  .hud-warn {
+    min-height: 40px;
   }
 }

@@ -196,9 +196,25 @@
     align-items: center;
     gap: var(--sp-1);
     flex: none;
-    height: 48px;
-    padding: 6px var(--sp-2) 0 var(--sp-4);
+    height: 52px;
+    padding: 8px var(--sp-2) 0 var(--sp-4);
     border-bottom: 1px solid var(--border);
+    /* つまみを上下にドラッグしてシートを広げる・閉じる（sidebar.ts）。ブラウザのスクロールに取られないように */
+    touch-action: none;
+    cursor: grab;
+  }
+
+  .sheet-handle .icon-btn {
+    cursor: pointer;
+  }
+
+  /* ドラッグ中は指に合わせて動かす（離したら元の速さで動く） */
+  #sidebar .sheet.is-dragging {
+    transition: none;
+  }
+
+  #sidebar .sheet.is-dragging .sheet-handle {
+    cursor: grabbing;
   }
 
   .sheet-handle .grip {

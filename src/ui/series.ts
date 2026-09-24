@@ -192,3 +192,47 @@ export function normalizeThresholds(raw: unknown): number[] {
   else if (raw && typeof raw === 'object') Object.values(raw as Record<string, unknown>).forEach(pick);
   return [...new Set(out)].sort((a, b) => a - b);
 }
+
+/**
+ * 文字列のおおよその幅 [px]（SVG の文字の配置用）。半角は 0.56 文字分、全角は 1 文字分として数える。
+ */
+export function estimateTextWidth(text: string, fontPx: number): number {
+  let w = 0;
+  for (const ch of text) w += ch.charCodeAt(0) < 0x2000 ? 0.56 : 1;
+  return w * fontPx;
+}
+
+/**
+ * グラフの横線に添える文字（しきい値のラベル）を、データの線とできるだけ重ならない側に置く。
+ * 候補はプロット領域の右端（'end'、既定）と左端（'start'）。それぞれの候補の文字の範囲（box の上下・幅）を
+ * 横切るデータの線分の数を数え、少ない方を選ぶ（同じなら右端）。
+ * @param xs ys データの点（画面座標、x は昇順）
+ * @param box 文字の縦の範囲（top〜bottom）、プロット領域の左右端（left・right）と文字の幅（width）
+ */
+export function chooseLabelSide(
+  xs: ArrayLike<number>,
+  ys: ArrayLike<number>,
+  count: number,
+  box: { left: number; right: number; top: number; bottom: number; width: number },
+): 'end' | 'start' {
+  const n = Math.min(count, xs.length, ys.length);
+  const hits = (x0: number, x1: number) => {
+    let c = 0;
+    // 線分ごと（点が 1 つだけなら、その点）
+    for (let i = 0; i < Math.max(1, n - 1); i++) {
+      if (i >= n) break;
+      const xa = xs[i];
+      const ya = ys[i];
+      const xb = i + 1 < n ? xs[i + 1] : xa;
+      const yb = i + 1 < n ? ys[i + 1] : ya;
+      if (Math.max(xa, xb) < x0 || Math.min(xa, xb) > x1) continue;
+      if (Math.max(ya, yb) < box.top || Math.min(ya, yb) > box.bottom) continue;
+      c++;
+    }
+    return c;
+  };
+  const end = hits(box.right - box.width, box.right);
+  if (end === 0) return 'end';
+  const start = hits(box.left, box.left + box.width);
+  return start < end ? 'start' : 'end';
+}

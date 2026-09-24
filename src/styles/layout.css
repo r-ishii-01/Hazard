@@ -2,7 +2,8 @@
 #app {
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
-  grid-template-rows: var(--header-h) minmax(0, 1fr) var(--timeline-h);
+  /* タイムラインは内容に合わせて伸びる（目印のチップが折り返したとき・タッチ操作で部品が大きいとき） */
+  grid-template-rows: var(--header-h) minmax(0, 1fr) minmax(var(--timeline-h), auto);
   grid-template-areas:
     "header header"
     "sidebar stage"
@@ -62,6 +63,18 @@ body[data-view="3d"] #view-2d,
 body:not([data-view]) #view-3d {
   visibility: hidden;
   pointer-events: none;
+}
+
+/*
+ * 見えていない方のビューの中の部品も必ず隠す。MapLibre の出典の開閉（.maplibregl-compact-show）のように
+ * 自分で visibility: visible を指定する部品は、親の visibility: hidden を打ち消して、見えないまま
+ * Tab キーのフォーカスを受けてしまう（3D 表示中に 2D 地図の出典のリンクへ移動する）。
+ * visibility: hidden の要素はフォーカスを受けない。main.ts も見えていない方のビューを inert にしている。
+ */
+body[data-view="2d"] #view-3d *,
+body[data-view="3d"] #view-2d *,
+body:not([data-view]) #view-3d * {
+  visibility: hidden !important;
 }
 
 #stage.is-shaking > .view {

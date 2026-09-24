@@ -2,6 +2,7 @@
  * 「地震・津波」タブ: 地形の状態、震度・シナリオの選択、条件の調整、実行と結果の要約。
  */
 import { SHINDO_LABEL, SHINDO_LEVELS, type AppState, type ShindoLevel, type TerrainGrid } from '../../core/types';
+import { isResultStale, partialExplanation, partialRangeLabel, resultCoverage, runConditionsLabel } from '../../core/results';
 import { createGridSpec, type Resolution } from '../../core/geo';
 import { SCENARIOS, SCENARIO_NOTES, SHINDO_PRESETS, defaultParams, getScenario, type ScenarioInfo } from '../../data/scenarios';
 import { INTENSITY_INFO } from '../../data/intensity';
@@ -10,9 +11,12 @@ import { DEM_CREDIT, DEM_CREDIT_HTML } from '../../data/sources';
 import type { UIContext } from '../context';
 import { extLink, h, linkifyText, safeAttributionHTML, setHidden, setText } from '../dom';
 import { radioField, selectField, sliderField } from '../fields';
-import { formatDepth, formatElapsed, formatMinutes, formatPercent, formatTP, formatArea, isSafeColor, readableTextColor } from '../format';
+import { formatDepth, formatElapsed, formatMinutes, formatPercent, formatSpan, formatTP, formatArea, isSafeColor, readableTextColor } from '../format';
 import { icon } from '../icons';
 import { JMA_SHINDO_TABLE_URL } from '../links';
+import { ARRIVAL_BASIS_LABEL, arrivalFactLabel } from '../scenarioText';
+
+export { arrivalFactLabel } from '../scenarioText';
 
 
 export function createQuakePanel(ctx: UIContext): HTMLElement {
@@ -234,11 +238,6 @@ function shindoSection(ctx: UIContext): HTMLElement {
 // シナリオ
 // ---------------------------------------------------------------------------
 
-/** 「最大波の到達（想定） 約8分」のような表記。説明用の例は「設定」とする */
-export function arrivalFactLabel(sc: Pick<ScenarioInfo, 'arrivalMin' | 'isOfficial'>): string {
-  return `最大波の到達（${sc.isOfficial ? '想定' : '設定'}） 約${formatMinutes(sc.arrivalMin)}`;
-}
-
 function scenarioCard(ctx: UIContext, sc: ScenarioInfo): HTMLElement {
   const warn = WARNING_INFO[sc.warning];
   const facts = [
@@ -254,7 +253,7 @@ function scenarioCard(ctx: UIContext, sc: ScenarioInfo): HTMLElement {
       type: 'button',
       class: 'scenario-main',
       'aria-pressed': 'false',
-      title: basis ? `到達時間の根拠: ${basis}` : undefined,
+      title: basis ? `${ARRIVAL_BASIS_LABEL}: ${basis}` : undefined,
       onclick: () => ctx.actions.selectScenario(sc.id),
     },
     h(
@@ -273,7 +272,7 @@ function scenarioCard(ctx: UIContext, sc: ScenarioInfo): HTMLElement {
   );
   // 以下は選択中のカードだけに表示する（CSS の .scenario-more）
   const desc = sc.description ? h('p', { class: 'scenario-desc' }, sc.description) : null;
-  const basisEl = basis ? h('p', { class: 'scenario-basis' }, h('strong', null, '到達時間の根拠: '), basis) : null;
+  const basisEl = basis ? h('p', { class: 'scenario-basis' }, h('strong', null, `${ARRIVAL_BASIS_LABEL}: `), basis) : null;
   const assumptions = (sc.assumptions ?? []).filter((a) => typeof a === 'string' && a.trim());
   const assumeEl = assumptions.length
     ? h('details', { class: 'notes scenario-assume' }, h('summary', null, `前提・仮定（${assumptions.length}件）`), h('ul', null, assumptions.map((a) => h('li', null, a))))
@@ -421,7 +420,7 @@ function paramsSection(ctx: UIContext): HTMLElement {
       max: 120,
       step: 1,
       digits: 0,
-      hint: '地震発生から、海岸で最大の波が来るまでの時間。公的資料の「最大津波到達時間」にあたります。このモデルでは、最も大きい波がこの時刻に海岸へ届くよう波を入れます（シナリオによっては、その前に小さな波が来る設定です。実際の津波でも、最大波より前に小さな波が来ることがあります）。',
+      hint: '地震発生から、海岸で最大の波が来るまでの時間。神奈川県の想定のシナリオでは、県の予測図の「最大津波到達時間」の値です（南海トラフは、内閣府が最大波の時刻を公表していないため「津波高+3m」の到達時間を使った設定値、説明用の例は設定値。値を変えると公的な値ではなくなります）。このモデルでは、最も大きい波がこの時刻に海岸へ届くよう波を入れます（シナリオによっては、その前に小さな波が来る設定です。実際の津波でも、最大波より前に小さな波が来ることがあります）。レイヤーの「津波到達時間」（各地点が最初に浸水した時刻）とは別の時刻です。',
       get: (s) => s.params.scenario.arrivalMin,
       commit: (v) => actions.updateScenario({ arrivalMin: v }),
     }),
@@ -479,7 +478,7 @@ function paramsSection(ctx: UIContext): HTMLElement {
       label: '解像度',
       variant: 'cards',
       options: RESOLUTION_OPTIONS.map((r) => ({ value: r.value, label: r.label, sub: `${cellCounts[r.value].toLocaleString('ja-JP')}セル・${r.note}` })),
-      hint: '解像度を変えると、地形データを読み込み直します。',
+      hint: '解像度を変えると、地形データを読み込み直します（表示中の計算結果は消えます。計算中なら、読み込み後に新しい解像度で計算し直します）。',
       get: (s) => s.params.resolution,
       commit: (v) => actions.updateParams({ resolution: v }),
     }),
@@ -511,6 +510,48 @@ function paramsSection(ctx: UIContext): HTMLElement {
 // 結果の要約
 // ---------------------------------------------------------------------------
 
+/** 表示中の結果の条件（例: 「相模トラフ西側・震度7」） */
+function conditionsLabel(s: AppState): string {
+  return runConditionsLabel(s, (lv) => SHINDO_LABEL[lv]);
+}
+
+/**
+ * 表示中の結果が前の条件のものであることの案内（ボタンで今の条件で計算し直せる）。
+ * パネル下部に固定した実行ボタンの上（震度・シナリオを選んだときに常に見える位置）に出す。
+ */
+function staleNotice(ctx: UIContext, extraClass = ''): HTMLElement {
+  const { store, actions } = ctx;
+  const text = h('span');
+  const btnLabel = h('span');
+  const btn = h('button', { type: 'button', class: 'btn btn-secondary btn-sm', onclick: () => actions.runSimulation() }, icon('retry', 14), btnLabel);
+  const el = h(
+    'div',
+    { class: `callout callout-warning compact stale-notice ${extraClass}`.trim(), role: 'status', hidden: true },
+    icon('alert', 16),
+    h('div', { class: 'notice-body' }, text, h('div', { class: 'notice-actions' }, btn)),
+  );
+  const render = () => {
+    const s = store.get();
+    const stale = isResultStale(s);
+    setHidden(el, !stale);
+    if (!stale) return;
+    const running = s.sim.status === 'running';
+    setText(
+      text,
+      running
+        ? `条件が変更されています。計算中の結果は変更前の条件（${conditionsLabel(s)}）によるものです。`
+        : `条件が変更されています。表示中の結果は変更前の条件（${conditionsLabel(s)}）によるものです。下の「この条件で再計算」で計算し直せます。`,
+    );
+    // 計算中は実行ボタンが隠れるので、ここに「この条件で計算し直す」（中止して今の条件で計算）を出す
+    setText(btnLabel, 'この条件で計算し直す');
+    setHidden(btn, !running);
+  };
+  ctx.scope.add(store.select((s) => s.params, render, true));
+  ctx.scope.add(store.select((s) => s.sim, render));
+  ctx.scope.add(store.select((s) => s.terrain.grid, render));
+  return el;
+}
+
 function resultsSection(ctx: UIContext): HTMLElement {
   const { store } = ctx;
   const coast = h('span', { class: 'stat-value' });
@@ -518,16 +559,16 @@ function resultsSection(ctx: UIContext): HTMLElement {
   const first = h('span', { class: 'stat-value' });
   const firstSub = h('span', { class: 'stat-sub' });
   const maxd = h('span', { class: 'stat-value' });
+  const maxdSub = h('span', { class: 'stat-sub' });
   const area = h('span', { class: 'stat-value' });
+  const areaSub = h('span', { class: 'stat-sub' });
   const partial = h('span', { class: 'tag tag-running' }, '計算途中');
+  const partialText = h('span');
+  const partialNote = h('div', { class: 'callout callout-warning compact partial-notice', role: 'status', hidden: true }, icon('alert', 16), partialText);
   const amp = h('span');
-  const stale = h(
-    'div',
-    { class: 'callout callout-warning compact', role: 'status' },
-    icon('alert', 16),
-    h('span', null, '条件が変更されています。表示中の結果は変更前の条件によるものです。再実行してください。'),
-  );
-  const title = h('h2', { class: 'section-title' }, icon('drop', 18), '計算結果', partial);
+  // 条件を変えた後も、再計算するまでは前の条件の結果が表示される
+  const staleTag = h('span', { class: 'tag tag-stale', hidden: true, title: '震度・シナリオ・条件を変更した後、まだ計算し直していません' }, '変更前の条件の結果');
+  const title = h('h2', { class: 'section-title' }, icon('drop', 18), '計算結果', partial, staleTag);
   // 計算側の注記（到達時間の補正・振幅の制限など。sim の出力が notes を持つ場合）
   const simNotesList = h('ul');
   const simNotes = h('div', { class: 'callout callout-info compact sim-notes', role: 'note' }, icon('info', 16), h('div', null, h('strong', null, '計算についての注記'), simNotesList));
@@ -536,76 +577,83 @@ function resultsSection(ctx: UIContext): HTMLElement {
   const stat = (label: string, value: HTMLElement, sub?: HTMLElement) => h('div', { class: 'stat' }, h('span', { class: 'stat-label' }, label), value, sub ?? null);
   const section = h(
     'section',
-    { class: 'section results', 'aria-live': 'polite' },
+    // 計算中は数値が 0.5 秒ごとに変わるので、ライブリージョンにはしない（読み上げが数値の羅列になる）。
+    // 計算の完了は、下の runBar が要約を 1 文で読み上げる（completionAnnouncement）
+    { class: 'section results', 'aria-label': '計算結果の要約' },
     title,
-    stale,
+    partialNote,
     h(
       'div',
       { class: 'stat-grid' },
       stat('海岸の最大水位', coast, coastTarget),
       stat('陸域で最初に浸水', first, firstSub),
-      stat('最大浸水深', maxd),
-      stat('浸水した範囲', area),
+      stat('最大浸水深', maxd, maxdSub),
+      stat('浸水した範囲', area, areaSub),
     ),
     h(
       'p',
       { class: 'field-hint' },
-      'いずれもこのサイトの簡易計算による値です。公的な想定や実際の津波とは異なります。',
+      'いずれもこのサイトの簡易計算による値です。公的な想定や実際の津波とは異なります。公式の津波浸水想定（神奈川県）と比べると、同じ地震の想定でも浸水域が1〜2割狭く、浸水深も浅めに出ます。避難には公式のハザードマップを使ってください。',
     ),
     simNotes,
     h('details', { class: 'notes' }, h('summary', null, '計算の調整について'), h('p', { class: 'small' }, amp)),
   );
 
-  // 実行開始時のパラメータを覚えておき、変更されたら「条件変更」を出す
-  let runParams: AppState['params'] | null = null;
-  ctx.scope.add(
-    store.select((s) => s.sim.runId, () => {
-      runParams = store.get().params;
-    }, true),
-  );
-  const updateStale = () => {
+  const render = () => {
+    const snap = ctx.watcher.snap;
+    const out = snap.output;
+    setHidden(section, !out);
+    if (!out) return;
     const s = store.get();
-    setHidden(stale, !(s.sim.output && runParams && s.params !== runParams));
+    // 完了かどうかは計算の状態ではなく結果そのもので判断する（中止・失敗の後も途中までの結果が残る）
+    const cov = resultCoverage(s);
+    const complete = !cov || cov.complete;
+    const running = cov?.state === 'running';
+    setHidden(partial, complete);
+    setText(partial, complete ? '' : partialRangeLabel(cov));
+    partial.dataset.state = cov?.state ?? '';
+    // 中止・失敗の途中までの結果は、その範囲と「浸水しない」という意味ではないことを示す
+    setHidden(staleTag, !isResultStale(s));
+    setHidden(partialNote, complete || running);
+    setText(partialText, complete || running ? '' : partialExplanation(cov));
+    const rangeSub = complete ? '' : `0〜${formatSpan(cov!.until)}の値`;
+    const sm = snap.summary;
+    const target = out.calibration?.targetCoastHeight ?? s.params.scenario.coastHeight;
+    setText(coast, sm ? formatTP(sm.coastMax) : '—');
+    setText(coastTarget, complete ? `目標 ${formatTP(target)}` : `目標 ${formatTP(target)}・${rangeSub}`);
+    if (sm && Number.isFinite(sm.firstArrival)) {
+      setText(first, formatElapsed(sm.firstArrival));
+      setText(firstSub, '地震発生から');
+    } else if (complete) {
+      setText(first, '浸水なし');
+      setText(firstSub, `計算した${formatElapsed(out.durationSec)}の間`);
+    } else {
+      // 途中まで: 「浸水なし」とは言わない
+      setText(first, '—');
+      setText(firstSub, `まだ浸水していません（${formatSpan(cov!.until)}まで計算${running ? '・計算中' : ''}）`);
+    }
+    const notes = outputNotes(out);
+    const notesKey = notes.join('\n');
+    if (notesKey !== lastNotesKey) {
+      lastNotesKey = notesKey;
+      simNotesList.replaceChildren(...notes.map((n) => h('li', null, n)));
+    }
+    setHidden(simNotes, notes.length === 0);
+    setText(maxd, sm ? formatDepth(sm.maxDepth) : '—');
+    setText(maxdSub, rangeSub);
+    setText(area, sm ? formatArea(sm.areaM2) : '—');
+    setText(areaSub, rangeSub);
+    const a = out.calibration?.boundaryAmplitude;
+    setText(
+      amp,
+      Number.isFinite(a)
+        ? `海岸での最大水位が目標値に近づくよう、沖合の境界から入れる波の振幅を ${a.toFixed(2)} m に自動調整しました。地形の影響で、目標値とずれることがあります。`
+        : '海岸での最大水位が目標値に近づくよう、沖合の境界から入れる波の振幅を自動調整しています。',
+    );
   };
-  ctx.scope.add(store.select((s) => s.params, updateStale, true));
-
-  ctx.scope.add(
-    ctx.watcher.subscribe((snap) => {
-      const out = snap.output;
-      setHidden(section, !out);
-      if (!out) return;
-      const running = store.get().sim.status === 'running';
-      setHidden(partial, !running);
-      const sm = snap.summary;
-      const target = out.calibration?.targetCoastHeight ?? store.get().params.scenario.coastHeight;
-      setText(coast, sm ? formatTP(sm.coastMax) : '—');
-      setText(coastTarget, `目標 ${formatTP(target)}`);
-      if (sm && Number.isFinite(sm.firstArrival)) {
-        setText(first, formatElapsed(sm.firstArrival));
-        setText(firstSub, '地震発生から');
-      } else {
-        setText(first, running ? '—' : '浸水なし');
-        setText(firstSub, running ? 'まだ浸水していません' : `計算した${formatElapsed(out.durationSec)}の間`);
-      }
-      const notes = outputNotes(out);
-      const notesKey = notes.join('\n');
-      if (notesKey !== lastNotesKey) {
-        lastNotesKey = notesKey;
-        simNotesList.replaceChildren(...notes.map((n) => h('li', null, n)));
-      }
-      setHidden(simNotes, notes.length === 0);
-      setText(maxd, sm ? formatDepth(sm.maxDepth) : '—');
-      setText(area, sm ? formatArea(sm.areaM2) : '—');
-      const a = out.calibration?.boundaryAmplitude;
-      setText(
-        amp,
-        Number.isFinite(a)
-          ? `海岸での最大水位が目標値に近づくよう、沖合の境界から入れる波の振幅を ${a.toFixed(2)} m に自動調整しました。地形の影響で、目標値とずれることがあります。`
-          : '海岸での最大水位が目標値に近づくよう、沖合の境界から入れる波の振幅を自動調整しています。',
-      );
-      updateStale();
-    }),
-  );
+  ctx.scope.add(ctx.watcher.subscribe(render));
+  ctx.scope.add(store.select((s) => s.sim.status, render));
+  ctx.scope.add(store.select((s) => s.params, render));
   return section;
 }
 
@@ -621,7 +669,6 @@ function outputNotes(out: unknown): string[] {
 
 function runBar(ctx: UIContext): HTMLElement {
   const { store, actions } = ctx;
-  let queued = false;
 
   const runLabel = h('span', null, 'シミュレーション実行');
   const runBtn = h(
@@ -630,8 +677,6 @@ function runBar(ctx: UIContext): HTMLElement {
       type: 'button',
       class: 'btn btn-primary btn-lg btn-block',
       onclick: () => {
-        const s = store.get();
-        if (s.terrain.status !== 'ready') queued = true;
         actions.runSimulation();
         render();
       },
@@ -651,11 +696,14 @@ function runBar(ctx: UIContext): HTMLElement {
     h('div', { class: 'progress', role: 'progressbar', 'aria-label': '計算の進み具合', 'aria-valuemin': '0', 'aria-valuemax': '100' }, fill),
   );
   const error = h('div', { class: 'callout callout-danger compact', role: 'alert' });
+  // 途中で止まった結果・地形の読み込み直しなどの知らせ（実行ボタンの上。常に見える位置）
+  const noticeText = h('span');
+  const notice = h('div', { class: 'callout callout-warning compact run-notice', role: 'status', hidden: true }, icon('alert', 16), noticeText);
 
   const render = () => {
     const s = store.get();
     const running = s.sim.status === 'running';
-    if (running || s.terrain.status === 'error') queued = false;
+    const cov = resultCoverage(s);
     setHidden(progress, !running);
     setHidden(runBtn, running);
     const pctText = formatPercent(s.sim.progress);
@@ -663,13 +711,12 @@ function runBar(ctx: UIContext): HTMLElement {
     progress.querySelector('.progress')?.setAttribute('aria-valuenow', String(Math.round(s.sim.progress * 100)));
     setText(pct, pctText);
     setText(msg, s.sim.message || '計算中…');
-    setText(runLabel, s.sim.output ? 'この条件で再計算' : 'シミュレーション実行');
+    setText(runLabel, cov ? 'この条件で再計算' : 'シミュレーション実行');
     let subText = '';
     if (running && s.sim.auto) {
-      const sc = getScenario(s.scenarioId);
-      subText = `初めて開いたときの自動計算です（${sc?.shortName ?? s.params.scenario.shortName}・震度${SHINDO_LABEL[s.shindo]}）。中止して条件を変えられます。`;
+      subText = `初めて開いたときの自動計算です（${autoRunLabel(s)}）。中止して条件を変えられます。`;
     } else if (!running) {
-      if (s.terrain.status === 'loading') subText = queued ? '地形データの読み込みが終わると自動で計算を始めます。' : '地形データの読み込み中です。実行すると、読み込み後に計算を始めます。';
+      if (s.terrain.status === 'loading') subText = s.sim.queued ? '地形データの読み込みが終わると自動で計算を始めます。' : '地形データの読み込み中です。実行すると、読み込み後に計算を始めます。';
       else if (s.terrain.status === 'error') subText = '実行すると、地形データの読み込みを再試行します。';
       else subText = `地震発生から${formatMinutes(s.params.durationMin)}後までを計算します。`;
     }
@@ -678,20 +725,51 @@ function runBar(ctx: UIContext): HTMLElement {
     const err = s.sim.status === 'error' ? s.sim.message || '計算中にエラーが発生しました。' : '';
     error.replaceChildren(icon('alert', 16), h('span', null, `計算できませんでした: ${err}`));
     setHidden(error, !err);
+    // 知らせ: 中止した途中までの結果（エラーの時は上のエラー表示に範囲を添える）・地形の読み込み直し
+    let note = '';
+    if (!running && cov && !cov.complete) note = `${cov.state === 'error' ? '' : '計算を中止しました。'}表示中の結果は地震発生から${formatSpan(cov.until)}までの途中の結果です。`;
+    else if (!running && !cov && s.sim.status === 'idle' && s.sim.message && s.sim.message !== '計算を中止しました') note = s.sim.message;
+    setText(noticeText, note);
+    setHidden(notice, !note);
   };
   ctx.scope.add(store.select((s) => s.sim, render, true));
   ctx.scope.add(store.select((s) => s.terrain.status, render));
+  ctx.scope.add(store.select((s) => s.terrain.grid, render));
   ctx.scope.add(store.select((s) => s.params.durationMin, render));
+  ctx.scope.add(ctx.watcher.subscribe(render, false));
 
   // 状態の変化を読み上げ
   ctx.scope.add(
     store.select((s) => s.sim.status, (st, prev) => {
       if (st === 'running') ctx.announce('シミュレーションの計算を開始しました');
-      else if (st === 'done') ctx.announce('計算が完了しました');
+      else if (st === 'done') {
+        const snap = ctx.watcher.snap;
+        ctx.announce(completionAnnouncement(snap.output ? snap.summary : null, snap.output?.durationSec ?? store.get().params.durationMin * 60));
+      }
       else if (st === 'error') ctx.announce('計算できませんでした');
-      else if (prev === 'running') ctx.announce('計算を中止しました');
+      else if (prev === 'running') ctx.announce(store.get().sim.message || '計算を中止しました');
     }),
   );
 
-  return h('div', { class: 'run-bar' }, error, runBtn, sub, progress);
+  return h('div', { class: 'run-bar' }, staleNotice(ctx, 'run-stale'), notice, error, runBtn, sub, progress);
+}
+
+/**
+ * 計算が完了したときの読み上げ（1 文の要約。数値には何の値かを添える）。
+ * 浸水が無かった場合も「安全」とは言わない（このサイトの計算は公式の想定より浸水が狭く浅めに出る）。
+ */
+export function completionAnnouncement(
+  summary: { firstArrival: number; maxDepth: number; areaM2: number } | null | undefined,
+  durationSec: number,
+): string {
+  if (!summary) return '計算が完了しました';
+  if (!Number.isFinite(summary.firstArrival)) {
+    return `計算が完了しました。計算した${formatElapsed(durationSec)}の間に、陸域の浸水はありませんでした（このサイトの簡易計算。安全という意味ではありません）。`;
+  }
+  return `計算が完了しました。陸域で最初に浸水したのは地震発生から${formatElapsed(summary.firstArrival)}、最大浸水深は${formatDepth(summary.maxDepth)}、浸水した範囲は${formatArea(summary.areaM2)}です（このサイトの簡易計算）。`;
+}
+
+/** 自動計算の説明に使う、計算中の条件の名前 */
+function autoRunLabel(s: AppState): string {
+  return conditionsLabel(s) || `${s.params.scenario.shortName}・震度${SHINDO_LABEL[s.shindo]}`;
 }

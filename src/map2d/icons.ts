@@ -3,6 +3,7 @@
  * すべて currentColor で塗るので、色は CSS 側で指定する。
  */
 import type { PersonKind, PersonStatus, ShelterKind } from '../core/types';
+import { PERSON_STATUS_INFO } from '../people';
 
 const svg = (viewBox: string, body: string) =>
   `<svg viewBox="${viewBox}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">${body}</svg>`;
@@ -49,19 +50,19 @@ export function personIconSvg(kind: PersonKind): string {
   return svg('0 0 24 24', PERSON_BODY[kind] ?? PERSON_BODY.adult);
 }
 
-/** 状態バッジ（16×16、白線） */
+/** 状態バッジ（16×16。線の色は currentColor: 状態の色の上で読みやすい白または濃紺。STATUS_STYLE の ink） */
 const STATUS_BADGE: Record<PersonStatus, string> = {
-  // 避難前: 時計
+  // 避難開始前: 時計
   waiting: '<circle cx="8" cy="8" r="4.6" stroke-width="1.6"/><path d="M8 5.4V8l1.8 1.2" stroke-width="1.6"/>',
   // 避難中: 矢印
   evacuating: '<path d="M3.8 8h7.6M8.4 4.8 11.6 8l-3.2 3.2" stroke-width="2"/>',
   // 避難完了: チェック
   safe: '<path d="m3.9 8.3 2.6 2.6 5.6-5.8" stroke-width="2.1"/>',
-  // 注意（浸水）: 波
+  // 浸水（注意）: 波
   caution: '<path d="M2.8 6.8c1.3-1.3 2.6-1.3 3.9 0s2.6 1.3 3.9 0 2-1 2.6-.6M2.8 10.4c1.3-1.3 2.6-1.3 3.9 0s2.6 1.3 3.9 0 2-1 2.6-.6" stroke-width="1.6"/>',
-  // 危険: ！
+  // 歩行困難（危険）: ！
   danger: '<path d="M8 3.6v5.4" stroke-width="2.2"/><circle cx="8" cy="12" r="1.2" fill="currentColor" stroke="none"/>',
-  // 命の危険: ×
+  // 生命の危険: ×
   critical: '<path d="m4.6 4.6 6.8 6.8M11.4 4.6l-6.8 6.8" stroke-width="2.2"/>',
 };
 
@@ -69,18 +70,49 @@ export function statusBadgeSvg(status: PersonStatus): string {
   return svg('0 0 16 16', `<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">${STATUS_BADGE[status]}</g>`);
 }
 
+/** 状態の並び（凡例と同じ順） */
+const STATUS_KEYS: PersonStatus[] = ['waiting', 'evacuating', 'safe', 'caution', 'danger', 'critical'];
+
+/** 状態の色が読み取れないときの色（people の定義が無い・不正な場合） */
+const FALLBACK_STATUS_COLOR = '#64748b';
+
+/** sRGB の相対輝度（WCAG 2.x） */
+function luminance(hex: string): number | null {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  const lin = (c: number) => {
+    const v = c / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
+}
+
+const INK_DARK = '#0f172a';
+const INK_LIGHT = '#ffffff';
+
+/** 背景色 bg の上で読みやすい文字・線の色（白と濃紺のうちコントラスト比が高い方） */
+export function inkOn(bg: string): string {
+  const l = luminance(bg);
+  if (l === null) return INK_LIGHT;
+  const dark = luminance(INK_DARK)!;
+  const onDark = (l + 0.05) / (dark + 0.05);
+  const onLight = 1.05 / (l + 0.05);
+  return onDark > onLight ? INK_DARK : INK_LIGHT;
+}
+
 /**
- * 状態ごとの色（白い円の縁取り・バッジ・経路の強調に使う）。
+ * 状態ごとの表示名・色（白い円の縁取り・バッジ・浸水深の札に使う）と、その色の上の文字・線の色。
+ * 表示名と色は people モジュールの PERSON_STATUS_INFO（「人物」タブの凡例・一覧・3D 表示と同じ）から作る。
  * 色だけに頼らないよう、バッジの形とラベル文字でも区別する。
  */
-export const STATUS_STYLE: Record<PersonStatus, { color: string; label: string }> = {
-  waiting: { color: '#64748b', label: '避難前' },
-  evacuating: { color: '#1d4ed8', label: '避難中' },
-  safe: { color: '#15803d', label: '避難完了' },
-  caution: { color: '#b45309', label: '注意（浸水）' },
-  danger: { color: '#dc2626', label: '危険（歩行困難）' },
-  critical: { color: '#7e22ce', label: '命の危険' },
-};
+export const STATUS_STYLE: Record<PersonStatus, { color: string; label: string; ink: string }> = Object.fromEntries(
+  STATUS_KEYS.map((st) => {
+    const info = PERSON_STATUS_INFO[st];
+    const color = info && /^#[0-9a-f]{6}$/i.test(info.color) ? info.color : FALLBACK_STATUS_COLOR;
+    return [st, { color, label: info?.label ?? st, ink: inkOn(color) }];
+  }),
+) as Record<PersonStatus, { color: string; label: string; ink: string }>;
 
 /** 避難場所の種別ごとのアイコン（16×16）と色・名称 */
 export const SHELTER_STYLE: Record<ShelterKind, { color: string; label: string; icon: string }> = {

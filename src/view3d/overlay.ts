@@ -1,25 +1,37 @@
 /**
  * 3D ビュー内の小さな DOM 要素（視点リセット・方位・出典・倍率の注記・ツールチップ・状態表示）。
  * スタイルは .v3d- 接頭辞のクラスに閉じ込める。
+ *
+ * 狭い画面（幅 560px 未満）: 左上は経過時間・水位の表示（UI 担当の HUD）が幅いっぱい近くまで使い、
+ * 右端の列（幅 約 70px）だけが地図の操作部品の場所なので、右上には方位磁針のボタン 1 つだけを置く
+ * （押すと視点をリセット。小さな矢印の印でそれを示す）。「視点をリセット」の文字のボタンは広い画面だけ。
+ * タッチ操作・狭い画面では、ボタンを指で押しやすい大きさ（40px）にする。
  */
 const STYLE_ID = 'view3d-style';
 
 const CSS = `
 .v3d-root{position:absolute;inset:0;overflow:hidden;background:#cfdfea;touch-action:none;user-select:none;-webkit-user-select:none}
 .v3d-root canvas{display:block;width:100%;height:100%;outline:none}
+.v3d-root canvas:focus-visible{outline:3px solid #0284c7;outline-offset:-3px}
 .v3d-tools{position:absolute;top:10px;right:10px;display:flex;gap:6px;align-items:center;z-index:2}
 .v3d-btn{font:600 12px/1 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#0f172a;background:rgba(255,255,255,.92);border:1px solid rgba(15,23,42,.18);border-radius:8px;padding:7px 10px;cursor:pointer;box-shadow:0 1px 3px rgba(15,23,42,.18);display:inline-flex;align-items:center;gap:5px}
 .v3d-btn:hover{background:#fff}
 .v3d-btn:focus-visible{outline:2px solid #0284c7;outline-offset:1px}
 .v3d-compass{width:32px;height:32px;padding:0;justify-content:center;border-radius:50%}
 .v3d-compass svg{transition:none}
+.v3d-compass-reset{display:none}
+@media (pointer:coarse){.v3d-btn{min-height:40px}.v3d-compass{width:40px;height:40px}.v3d-attrib-btn{min-height:32px;min-width:48px}}
+.v3d-root.v3d-narrow .v3d-tools{top:8px;right:8px}
+.v3d-root.v3d-narrow .v3d-reset{display:none}
+.v3d-root.v3d-narrow .v3d-compass{width:40px;height:40px;position:relative}
+.v3d-root.v3d-narrow .v3d-compass-reset{display:grid;place-items:center;position:absolute;right:-4px;bottom:-4px;width:17px;height:17px;border-radius:50%;background:#0f172a;color:#fff;border:1.5px solid #fff;box-sizing:border-box}
 .v3d-note{position:absolute;left:8px;bottom:6px;z-index:2;font:500 11px/1.35 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#1e293b;background:rgba(255,255,255,.82);border-radius:6px;padding:3px 7px;cursor:help;max-width:60%}
 .v3d-attrib{position:absolute;right:0;bottom:0;z-index:2;font:400 10px/1.4 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#334155;background:rgba(255,255,255,.8);padding:2px 6px;border-top-left-radius:6px;max-width:min(72%,720px);text-align:right}
 .v3d-attrib a{color:inherit;text-decoration:underline;text-decoration-color:rgba(51,65,85,.4)}
 .v3d-attrib-btn{display:none;font:600 11px/1 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#1e293b;background:rgba(255,255,255,.88);border:1px solid rgba(15,23,42,.18);border-radius:999px;padding:5px 9px;cursor:pointer}
 .v3d-attrib-btn:focus-visible{outline:2px solid #0284c7;outline-offset:1px}
-.v3d-root.v3d-narrow .v3d-attrib-btn{display:block;position:absolute;right:6px;bottom:6px;z-index:3}
-.v3d-root.v3d-narrow .v3d-attrib{bottom:34px;right:6px;border-radius:6px;max-width:calc(100% - 12px)}
+.v3d-root.v3d-narrow .v3d-attrib-btn{display:block;position:absolute;right:6px;bottom:3px;z-index:3;min-height:30px;min-width:48px}
+.v3d-root.v3d-narrow .v3d-attrib{bottom:40px;right:6px;border-radius:6px;max-width:calc(100% - 12px)}
 .v3d-root.v3d-narrow .v3d-attrib[data-open="0"]{display:none}
 .v3d-msg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2;font:600 13px/1.5 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#0f172a;background:rgba(255,255,255,.9);border-radius:10px;padding:10px 16px;box-shadow:0 2px 10px rgba(15,23,42,.2);pointer-events:none;text-align:center;max-width:80%}
 .v3d-tip{position:absolute;z-index:3;pointer-events:none;font:500 12px/1.45 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#f8fafc;background:rgba(15,23,42,.9);border-radius:6px;padding:5px 8px;white-space:pre-line;max-width:280px;transform:translate(12px,12px)}
@@ -64,15 +76,17 @@ export class Overlay {
     const compass = document.createElement('button');
     compass.type = 'button';
     compass.className = 'v3d-btn v3d-compass';
-    compass.title = '方位（赤が北）。クリックで視点をリセット';
-    compass.setAttribute('aria-label', '方位磁針（クリックで視点をリセット）');
+    compass.title = '方位（赤が北）。押すと視点をリセット';
+    compass.setAttribute('aria-label', '方位磁針（赤が北）。押すと視点をリセット');
     compass.innerHTML =
-      '<svg width="22" height="22" viewBox="-11 -11 22 22" aria-hidden="true"><g><polygon points="0,-9 3.2,0 -3.2,0" fill="#dc2626"/><polygon points="0,9 3.2,0 -3.2,0" fill="#94a3b8"/><circle r="1.4" fill="#0f172a"/></g></svg>';
+      '<svg width="22" height="22" viewBox="-11 -11 22 22" aria-hidden="true"><g><polygon points="0,-9 3.2,0 -3.2,0" fill="#dc2626"/><polygon points="0,9 3.2,0 -3.2,0" fill="#94a3b8"/><circle r="1.4" fill="#0f172a"/></g></svg>' +
+      // 狭い画面では「視点をリセット」のボタンを出さないので、方位磁針にリセットの印を付ける
+      '<span class="v3d-compass-reset" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/></svg></span>';
     this.compassArrow = compass.querySelector('g')!;
     compass.addEventListener('click', () => handlers.onReset());
     const reset = document.createElement('button');
     reset.type = 'button';
-    reset.className = 'v3d-btn';
+    reset.className = 'v3d-btn v3d-reset';
     reset.title = '最初の視点（沖合の南南西から鵠沼海岸を見る）に戻します';
     reset.innerHTML =
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/></svg><span>視点をリセット</span>';

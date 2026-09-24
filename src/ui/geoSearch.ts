@@ -364,21 +364,96 @@ export function reverseUrl(lon: number, lat: number): string {
   return `${GSI_REVERSE_URL}?lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}`;
 }
 
-/** 地名・住所を検索する（失敗時は例外。中止は AbortError） */
-export async function searchPlaces(query: string, opts: { signal?: AbortSignal; fetchFn?: FetchLike } = {}): Promise<PlaceResult[]> {
-  const q = normalizeQuery(query);
-  if (!q) return [];
-  const res = await (opts.fetchFn ?? defaultFetch)(searchUrl(q), { signal: opts.signal, credentials: 'omit', mode: 'cors' });
-  if (!res.ok) throw new HttpError(res.status);
-  return sortResults(snapToKnownPlaces(parseSearchResponse(await res.json())), MAX_RESULTS, q);
+/**
+ * 地名検索・逆ジオコーダーの応答を待つ上限 [ms]。
+ * 国土地理院はこれらの機能を常に提供できるとは限らないとしており、応答が返らないまま止まることもある。
+ * 待ち続けると「検索しています…」のまま再試行もできず、住所の問い合わせの順番待ちも止まってしまうので打ち切る。
+ */
+export const GSI_REQUEST_TIMEOUT_MS = 10_000;
+
+/** 時間切れで打ち切ったことを表す例外（name は 'TimeoutError'。呼び出し側の中止 'AbortError' とは区別する） */
+export function timeoutError(ms: number): Error {
+  return new DOMException(`${Math.round(ms / 1000)}秒待っても応答がありませんでした`, 'TimeoutError');
 }
 
-/** 住所の目安を調べる（得られなければ null。通信の失敗は例外） */
-export async function reverseGeocode(lon: number, lat: number, opts: { signal?: AbortSignal; fetchFn?: FetchLike } = {}): Promise<ReverseResult | null> {
+function abortError(reason?: unknown): Error {
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+  return new DOMException('中止しました', 'AbortError');
+}
+
+/** 時間切れで打ち切ったか */
+export function isTimeoutError(e: unknown): boolean {
+  return (e as Error | null)?.name === 'TimeoutError';
+}
+
+/**
+ * fn（通信と応答の読み取り）を、呼び出し側の中止（signal）と時間切れ（timeoutMs）のどちらでも打ち切る。
+ * - 時間切れは TimeoutError、呼び出し側の中止は AbortError で失敗する。
+ * - fn に渡す signal も中止するので、fetch はその時点で通信を止める。fetch が signal に従わない場合
+ *   （応答の本文の読み取りで止まる・テストの差し替えなど）も、応答を待たずに失敗させる。
+ */
+export function withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>, opts: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
+  const ms = opts.timeoutMs ?? GSI_REQUEST_TIMEOUT_MS;
+  const ac = new AbortController();
+  const outer = opts.signal;
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (f: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      outer?.removeEventListener('abort', onAbort);
+      f();
+    };
+    const fail = (err: Error) => {
+      settle(() => reject(err));
+      if (!ac.signal.aborted) ac.abort(err);
+    };
+    function onAbort() {
+      fail(abortError(outer?.reason));
+    }
+    if (outer?.aborted) {
+      onAbort();
+      return;
+    }
+    outer?.addEventListener('abort', onAbort, { once: true });
+    if (Number.isFinite(ms) && ms > 0) timer = setTimeout(() => fail(timeoutError(ms)), ms);
+    let p: Promise<T>;
+    try {
+      p = fn(ac.signal);
+    } catch (e) {
+      settle(() => reject(e));
+      return;
+    }
+    p.then(
+      (v) => settle(() => resolve(v)),
+      (e: unknown) => settle(() => reject(e)),
+    );
+  });
+}
+
+type RequestOpts = { signal?: AbortSignal; fetchFn?: FetchLike; timeoutMs?: number };
+
+/** 地名・住所を検索する（失敗時は例外。中止は AbortError、応答が無いまま GSI_REQUEST_TIMEOUT_MS を過ぎたら TimeoutError） */
+export async function searchPlaces(query: string, opts: RequestOpts = {}): Promise<PlaceResult[]> {
+  const q = normalizeQuery(query);
+  if (!q) return [];
+  return withTimeout(async (signal) => {
+    const res = await (opts.fetchFn ?? defaultFetch)(searchUrl(q), { signal, credentials: 'omit', mode: 'cors' });
+    if (!res.ok) throw new HttpError(res.status);
+    return sortResults(snapToKnownPlaces(parseSearchResponse(await res.json())), MAX_RESULTS, q);
+  }, opts);
+}
+
+/** 住所の目安を調べる（得られなければ null。通信の失敗・時間切れ（TimeoutError）は例外） */
+export async function reverseGeocode(lon: number, lat: number, opts: RequestOpts = {}): Promise<ReverseResult | null> {
   if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
-  const res = await (opts.fetchFn ?? defaultFetch)(reverseUrl(lon, lat), { signal: opts.signal, credentials: 'omit', mode: 'cors' });
-  if (!res.ok) throw new HttpError(res.status);
-  return parseReverseResponse(await res.json());
+  return withTimeout(async (signal) => {
+    const res = await (opts.fetchFn ?? defaultFetch)(reverseUrl(lon, lat), { signal, credentials: 'omit', mode: 'cors' });
+    if (!res.ok) throw new HttpError(res.status);
+    return parseReverseResponse(await res.json());
+  }, opts);
 }
 
 /** 大きさを限った入れ物（古いものから捨てる） */

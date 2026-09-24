@@ -42,6 +42,13 @@ export function disclaimerBody(): HTMLElement {
       h(
         'li',
         null,
+        'このサイトの計算は、',
+        h('strong', null, '公式の津波浸水想定（神奈川県）より浸水が狭く、浅めに出ます'),
+        '（同じ地震の県の想定と比べても、浸水域が1〜2割狭い）。計算で浸水しなかった場所も、公式の想定では浸水することがあります。',
+      ),
+      h(
+        'li',
+        null,
         '実際の避難は、',
         extLink(FUJISAWA_TSUNAMI_HAZARDMAP_URL, '藤沢市の津波ハザードマップ'),
         'と、',

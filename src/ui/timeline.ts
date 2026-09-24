@@ -3,6 +3,7 @@
  */
 import { SPEED_OPTIONS } from '../core/controller';
 import type { AppState } from '../core/types';
+import { partialRangeLabel, playbackEnd, resultCoverage, resultParams, usableOutput } from '../core/results';
 import { WARNING_INFO } from '../data/warnings';
 import { getScenario } from '../data/scenarios';
 import { safeCall, timelineDuration, type UIContext } from './context';
@@ -11,6 +12,7 @@ import { clamp, formatClock, formatElapsed, formatTP } from './format';
 import { icon } from './icons';
 import { JMA_ISSUE_TARGET_LABEL, warningShowSec } from './hud';
 import { interpolateSeries, linePath, seriesExtent } from './series';
+import { ARRIVAL_BASIS_LABEL, arrivalMarkerLabel } from './scenarioText';
 
 const SPARK_W = 1000;
 const SPARK_H = 40;
@@ -63,11 +65,13 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
   const nowEl = h('span', { class: 'tl-now' }, '0:00');
   const durEl = h('span', { class: 'tl-dur' }, '/ 60:00');
   const waitEl = h('span', { class: 'tl-wait', hidden: true, title: '再生が計算に追いついたため、計算の進み具合に合わせて再生しています' }, '計算に合わせて再生中');
+  // 中止・失敗で途中までの結果: 計算した範囲（それより先へは進めない）
+  const partialEl = h('span', { class: 'tl-partial', hidden: true });
 
   el.replaceChildren(
     h('div', { class: 'tl-controls' }, playBtn, h('label', { class: 'visually-hidden', for: speedId }, '再生速度'), speedSel),
     main,
-    h('div', { class: 'tl-time' }, h('span', { class: 'tl-time-row' }, nowEl, durEl), waitEl),
+    h('div', { class: 'tl-time' }, h('span', { class: 'tl-time-row' }, nowEl, durEl), waitEl, partialEl),
   );
   el.setAttribute('aria-label', 'タイムライン');
 
@@ -77,7 +81,7 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
   let scrubbing = false;
 
   const limitT = (s: AppState) => {
-    const out = s.sim.output;
+    const out = usableOutput(s);
     const d = timelineDuration(s);
     return out ? Math.min(d, Math.max(0, ctx.watcher.snap.timeReady || safeCall(() => out.timeReady(), 0))) : d;
   };
@@ -101,7 +105,7 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
       setText(nowEl, formatClock(t));
       range.setAttribute('aria-valuetext', `地震発生から${formatElapsed(t)}`);
     }
-    const out = s.sim.output;
+    const out = usableOutput(s);
     const tr = ctx.watcher.snap.timeReady;
     // 再生が計算済みの時刻に近づくと、コントローラーが計算の速さに合わせて再生する（数フレーム手前を追う）
     const lag = out ? safeCall(() => out.frameInterval, 20) * 2.5 : 0;
@@ -121,16 +125,23 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
   };
 
   const renderBuffer = () => {
-    const out = store.get().sim.output;
+    const s = store.get();
+    const out = usableOutput(s);
     const tr = out ? ctx.watcher.snap.timeReady : 0;
     buffer.style.transform = `scaleX(${duration > 0 ? clamp(tr / duration, 0, 1) : 0})`;
     setHidden(buffer, !out);
+    const cov = resultCoverage(s);
+    const stopped = !!cov && !cov.complete && cov.state !== 'running';
+    setHidden(partialEl, !stopped);
+    setText(partialEl, stopped ? partialRangeLabel(cov) : '');
+    partialEl.title = stopped ? 'この時刻より後は計算していません（浸水しないという意味ではありません）' : '';
   };
 
   // ---- 目印 -----------------------------------------------------------------------------
   const renderMarkers = () => {
     const s = store.get();
-    const sc = s.params.scenario;
+    // 表示中の結果の条件で（震度・シナリオを選び直しても、再計算するまでは地図の浸水と同じ条件の目印）
+    const sc = resultParams(s).scenario;
     const list: Marker[] = [];
     if (sc.shakingSec > 0) list.push({ id: 'shake', label: '揺れ終了', color: '#64748b', t: sc.shakingSec });
     const w = WARNING_INFO[sc.warning];
@@ -139,12 +150,16 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
     if (w && warnAt !== null && sc.warning !== 'forecast') {
       list.push({ id: 'warn', label: `${w.label}の目安`, color: '#7e22ce', t: warnAt, note: `気象庁の発表目標（地震発生から${JMA_ISSUE_TARGET_LABEL}）` });
     }
-    const basis = (getScenario(sc.id)?.arrivalBasis ?? '').trim();
-    list.push({ id: 'arrival', label: '最大波の想定時刻', color: '#d97706', t: sc.arrivalMin * 60, note: basis ? `根拠: ${basis}` : undefined });
+    // 公的資料の「最大津波到達時間」そのものなら「想定時刻」、南海トラフ（代用の値）・説明用の例・変更した値は「設定時刻」
+    const label = arrivalMarkerLabel(sc);
+    const base = getScenario(sc.id);
+    const basis = base && base.arrivalMin === sc.arrivalMin ? (base.arrivalBasis ?? '').trim() : '';
+    list.push({ id: 'arrival', label, color: '#d97706', t: sc.arrivalMin * 60, note: basis ? `${ARRIVAL_BASIS_LABEL}: ${basis}` : undefined });
     const first = ctx.watcher.snap.output ? ctx.watcher.snap.summary?.firstArrival : undefined;
     if (first !== undefined && Number.isFinite(first)) list.push({ id: 'flood', label: '最初の浸水（計算）', color: '#dc2626', t: first });
 
-    const visible = list.filter((m) => m.t >= 0 && m.t <= duration);
+    // 時刻の順に並べる（狭い画面では目印のチップが 1 行で横にスクロールするので、早い順に見えるように）
+    const visible = list.filter((m) => m.t >= 0 && m.t <= duration).sort((a, b) => a.t - b.t);
     markerLayer.replaceChildren(
       ...visible.map((m) =>
         h('span', { class: 'tl-marker', dataset: { id: m.id }, style: { left: `${(m.t / duration) * 100}%`, '--mk': m.color }, title: [`${m.label} ${formatClock(m.t)}`, m.note].filter(Boolean).join('\n') }),
@@ -167,12 +182,28 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
         ),
       ),
     );
+    updateChipsOverflow();
   };
+
+  // 狭い画面では目印のチップを 1 行で横にスクロールする。入りきらない間は右端を薄くして続きがあることを示す
+  const updateChipsOverflow = () => {
+    const over = chips.scrollWidth > chips.clientWidth + 1;
+    chips.classList.toggle('is-overflowing', over);
+    chips.classList.toggle('is-scrolled-end', over && chips.scrollLeft + chips.clientWidth >= chips.scrollWidth - 2);
+  };
+  chips.addEventListener('scroll', updateChipsOverflow, { passive: true });
+  // Tab キーで選んだチップが見えるように
+  chips.addEventListener('focusin', (e) => (e.target as HTMLElement).scrollIntoView?.({ block: 'nearest', inline: 'nearest' }));
+  if (typeof ResizeObserver === 'function') {
+    const ro = new ResizeObserver(() => updateChipsOverflow());
+    ro.observe(chips);
+    ctx.scope.add(() => ro.disconnect());
+  }
 
   // ---- スパークライン --------------------------------------------------------------------
   const renderSpark = () => {
     const s = store.get();
-    const out = s.sim.output;
+    const out = usableOutput(s);
     const n = out ? safeCall(() => out.gauge.count(), 0) : 0;
     setHidden(sparkEmpty, n > 1);
     setHidden(sparkMax, n < 2);
@@ -183,7 +214,7 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
     }
     const g = out.gauge;
     const ext = seriesExtent(g.eta, n);
-    const base = s.params.tideTP;
+    const base = resultParams(s).tideTP;
     const lo = Math.min(ext?.min ?? base, base) - 0.3;
     const hi = Math.max(ext?.max ?? base, base) + 0.3;
     sparkPath.setAttribute('d', linePath(g.t, g.eta, n, { t0: 0, t1: duration, yMin: lo, yMax: hi, width: SPARK_W, height: SPARK_H, maxPoints: 800 }));
@@ -200,7 +231,7 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
     if (rect.width <= 0) return;
     const p = clamp((e.clientX - rect.left) / rect.width, 0, 1);
     const t = p * duration;
-    const out = store.get().sim.output;
+    const out = usableOutput(store.get());
     let text = formatClock(t);
     if (out) {
       const n = safeCall(() => out.gauge.count(), 0);
@@ -240,7 +271,8 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
     if (!scrubbing) return;
     scrubbing = false;
     seek(Number(range.value));
-    if (wasPlaying) actions.play();
+    // 終わりまで動かして離したときは、そこで止めたままにする（再生を再開すると最初に戻ってしまう）
+    if (wasPlaying && store.get().time.t < playbackEnd(store.get()) - 0.5) actions.play();
     wasPlaying = false;
   };
   range.addEventListener('input', () => {
@@ -281,8 +313,9 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
   );
   ctx.scope.add(store.select((s) => s.time.speed, (v) => (speedSel.value = String(v)), true));
   ctx.scope.add(store.select(timelineDuration, renderDuration, true));
-  ctx.scope.add(store.select((s) => s.params.scenario, renderMarkers));
-  ctx.scope.add(store.select((s) => s.params.tideTP, renderSpark));
+  ctx.scope.add(store.select((s) => resultParams(s).scenario, renderMarkers));
+  ctx.scope.add(store.select((s) => resultParams(s).tideTP, renderSpark));
+  ctx.scope.add(store.select((s) => s.sim.status, renderBuffer));
   ctx.scope.add(
     ctx.watcher.subscribe(() => {
       renderBuffer();

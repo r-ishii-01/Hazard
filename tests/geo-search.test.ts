@@ -1,10 +1,11 @@
 /**
  * 地名・住所の検索（国土地理院 地名検索API）・住所の目安（逆ジオコーダー）・現在地の純粋な処理。
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DOMAIN_BOUNDS, createGridSpec, lonLatToCell } from '../src/core/geo';
 import { CELL_LAND, CELL_SEA } from '../src/core/types';
 import {
+  GSI_REQUEST_TIMEOUT_MS,
   LruCache,
   areaLabel,
   cleanText,
@@ -12,6 +13,7 @@ import {
   distanceToDomain,
   formatApproxDistance,
   isInsideBounds,
+  isTimeoutError,
   municipalityOf,
   normalizeMuniCode,
   normalizeQuery,
@@ -27,6 +29,7 @@ import {
   searchPlaces,
   searchUrl,
   sortResults,
+  withTimeout,
   type FetchLike,
 } from '../src/ui/geoSearch';
 import { GEO_OPTIONS, GeoError, describeAccuracy, geoErrorKind, geoErrorMessage, isLowAccuracy, requestPosition, toUserLocation } from '../src/ui/geolocate';
@@ -237,6 +240,74 @@ describe('requests', () => {
     const fetchFn: FetchLike = async () => ({ ok: true, status: 200, json: async () => ({ results: { muniCd: '14205', lv01Nm: '片瀬海岸一丁目' } }) });
     expect((await reverseGeocode(139.48, 35.31, { fetchFn }))?.label).toBe('藤沢市片瀬海岸一丁目');
     expect(await reverseGeocode(NaN, 35.31, { fetchFn })).toBeNull();
+  });
+});
+
+describe('request timeouts (国土地理院の API が応答しないまま止まる場合)', () => {
+  /** 応答を返さない fetch（signal にも従わない） */
+  const stalled: FetchLike = () => new Promise(() => {});
+  /** ヘッダーは返すが本文の読み取りで止まる fetch */
+  const stalledBody: FetchLike = async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) });
+
+  it('waits at most about 10 seconds by default', () => {
+    expect(GSI_REQUEST_TIMEOUT_MS).toBeGreaterThanOrEqual(5_000);
+    expect(GSI_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(15_000);
+  });
+
+  it('gives up with a TimeoutError (not an AbortError) when the search API never answers', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = searchPlaces('鵠沼海岸駅', { fetchFn: stalled });
+      const done = expect(p).rejects.toMatchObject({ name: 'TimeoutError' });
+      await vi.advanceTimersByTimeAsync(GSI_REQUEST_TIMEOUT_MS + 1);
+      await done;
+      const e = await p.catch((err: unknown) => err);
+      expect(isTimeoutError(e)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up when the reverse geocoder stalls while reading the body', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = reverseGeocode(139.4702, 35.3187, { fetchFn: stalledBody });
+      const done = expect(p).rejects.toMatchObject({ name: 'TimeoutError' });
+      await vi.advanceTimersByTimeAsync(GSI_REQUEST_TIMEOUT_MS + 1);
+      await done;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('aborts the underlying request on timeout and rejects with AbortError when the caller cancels', async () => {
+    let seen: AbortSignal | undefined;
+    const spy: FetchLike = (_url, init) => {
+      seen = init.signal;
+      return new Promise(() => {});
+    };
+    const timedOut = searchPlaces('鵠沼', { fetchFn: spy, timeoutMs: 20 });
+    await expect(timedOut).rejects.toMatchObject({ name: 'TimeoutError' });
+    expect(seen?.aborted).toBe(true);
+
+    const ac = new AbortController();
+    const cancelled = reverseGeocode(139.47, 35.32, { fetchFn: spy, signal: ac.signal, timeoutMs: 60_000 });
+    ac.abort();
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    expect(seen?.aborted).toBe(true);
+    // 呼び出す前に中止済み
+    await expect(searchPlaces('鵠沼', { fetchFn: spy, signal: ac.signal })).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('passes results and errors through unchanged and clears the timer', async () => {
+    vi.useFakeTimers();
+    try {
+      await expect(withTimeout(async () => 42, { timeoutMs: 1000 })).resolves.toBe(42);
+      await expect(withTimeout(async () => Promise.reject(new Error('boom')), { timeoutMs: 1000 })).rejects.toThrow('boom');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

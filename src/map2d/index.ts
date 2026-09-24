@@ -10,6 +10,10 @@
  *
  * 描画は requestAnimationFrame にまとめ、時刻・レイヤー・データが変わったときだけ更新する。
  * 浸水画像の更新は最大 30 回/秒。
+ *
+ * 計算結果は core/results.ts の usableOutput（今の地形の格子の上で計算した結果）だけを描く。
+ * 計算結果が変わったら、非表示のレイヤーが持っている前の結果への参照も手放す（全フレームをメモリに残さない）。
+ * 背景地図・色別標高・公式ハザードマップのタイルを取得できないときは、地図の上に理由を表示する。
  */
 import {
   AttributionControl,
@@ -19,11 +23,13 @@ import {
   ScaleControl,
   setWorkerUrl,
   type ImageSource,
+  type RasterTileSource,
   type MapMouseEvent,
   type GeoJSONSource,
 } from 'maplibre-gl';
 import type { AppStore } from '../core/store';
 import type { AppActions } from '../core/controller';
+import { resultParams, usableOutput } from '../core/results';
 import { CELL_SEA, type AppState, type Basemap, type CursorInfo, type MapFocus, type SimOutput, type TerrainGrid } from '../core/types';
 import { INITIAL_CENTER, INITIAL_ZOOM, createGridSpec, gridCornerCoordinates, lonLatToCell, type GridSpec } from '../core/geo';
 import { BASEMAPS, DEM_CREDIT_HTML } from '../data/sources';
@@ -54,8 +60,22 @@ const MAX_BOUNDS = MAP_VIEW_BOUNDS;
 const FLOOD_INTERVAL_MS = 33;
 /** 計算中の最大浸水深・到達時間の更新間隔 [ms] */
 const GROWING_INTERVAL_MS = 700;
-/** 経路の更新間隔 [ms] */
+/** 経路の更新間隔 [ms]（再生中。人物のマーカーは毎フレーム動くので、経路の通過済みの部分は少し遅れてよい） */
+const ROUTE_INTERVAL_PLAYING_MS = 150;
+/** 経路の更新間隔 [ms]（時刻を動かしている・止まっているとき） */
 const ROUTE_INTERVAL_MS = 66;
+/** タイルを取得できなかった後、取得できるようになったとみなすまでの時間 [ms] */
+const TILE_RECOVER_MS = 3000;
+/** 地図の操作ボタンの大きさ（狭い画面・タッチ操作）[px] */
+const TOUCH_TARGET_PX = 40;
+
+/** 取得できないと知らせるタイルのソース（表示中のものだけ） */
+type NoticeSource = 'basemap' | 'relief' | 'hazard';
+const NOTICE_TEXT: Record<NoticeSource, string> = {
+  basemap: '背景地図（地理院タイル）を読み込めません。',
+  relief: '色別標高図（地理院タイル）を読み込めません。',
+  hazard: '公式ハザードマップ（津波浸水想定）のタイルを読み込めません。表示されない部分も「浸水しない」という意味ではありません。',
+};
 /** カーソル情報の更新間隔 [ms] */
 const CURSOR_INTERVAL_MS = 60;
 
@@ -120,6 +140,14 @@ export class MapView2D {
   private readonly root: HTMLDivElement;
   private readonly hint: HTMLDivElement;
   private readonly toast: HTMLDivElement;
+  /** タイルを取得できないときの案内（取得できるようになるまで出したまま） */
+  private readonly notice: HTMLDivElement;
+  private readonly noticeText: HTMLSpanElement;
+  /** ソースごとの、タイルを取得できなかった時刻・取得できた時刻 */
+  private tileTrouble = new Map<string, { failedAt: number; okAt: number }>();
+  private noticeTimer = 0;
+  private fitTimer = 0;
+  private noticeKey = '';
   private map: MapLibreMap | null = null;
   private ready = false;
   private active = true;
@@ -181,6 +209,17 @@ export class MapView2D {
     this.toast.className = 'm2d-toast';
     this.toast.setAttribute('role', 'status');
     this.toast.setAttribute('aria-live', 'polite');
+    this.notice = document.createElement('div');
+    this.notice.className = 'm2d-notice';
+    this.notice.setAttribute('role', 'status');
+    this.notice.hidden = true;
+    this.noticeText = document.createElement('span');
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'm2d-notice__retry';
+    retry.textContent = '再読み込み';
+    retry.addEventListener('click', () => this.retryTiles());
+    this.notice.append(this.noticeText, retry);
 
     const mk = (id: string): SimRaster => ({ id, canvas: new CellCanvas(), key: '', spec: null, output: null });
     this.rasters = { flood: mk(IDS.flood), maxDepth: mk(IDS.maxDepth), arrival: mk(IDS.arrival) };
@@ -221,11 +260,12 @@ export class MapView2D {
     this.currentBasemap = s.basemap;
     // 注記のある背景地図（淡色・標準）では、駅名が地図にも書かれていて二重になるので駅の地点ラベルを出さない
     this.root.classList.toggle('m2d-basemap-labeled', s.basemap !== 'photo');
-    this.root.append(this.hint, this.toast);
+    this.root.append(this.hint, this.notice, this.toast);
 
     map.touchZoomRotate.disableRotation();
     map.keyboard.disableRotation();
     map.addControl(new NavigationControl({ showCompass: false, visualizePitch: false }), 'top-right');
+    map.on('resize', () => this.fitControls());
     map.addControl(new ScaleControl({ unit: 'metric', maxWidth: 110 }), 'bottom-left');
     // 各ソースの出典はソースごとに自動表示。主な地点（POI）は OSM 由来の位置を含むので常に表示する
     map.addControl(new AttributionControl({ compact: true, customAttribution: POIS.length ? POI_ATTRIBUTION : undefined }), 'bottom-right');
@@ -241,10 +281,12 @@ export class MapView2D {
     }
 
     map.on('error', this.onMapError);
+    map.on('sourcedata', this.onSourceData);
     // 'load' は表示範囲のタイルが揃うまで待つので、スタイルの準備ができた時点で重ね合わせを始める
     map.once('style.load', () => {
       if (this.destroyed) return;
       this.ready = true;
+      this.fitControls();
       this.people = new PeopleLayer(map, actions, (lon, lat) => this.checkPlacement(lon, lat), (m) => this.showToast(m));
       this.shelters = new ShelterLayer(map);
       this.pois = new PoiLayer(map);
@@ -276,6 +318,7 @@ export class MapView2D {
     this.active = active;
     if (active && this.map) {
       this.map.resize();
+      this.placeOverlays();
       if (!was) this.dirty = ALL_DIRTY();
       // 3D 表示の間に届いた移動の要求は、表示したときにアニメーションなしで反映する
       const f = this.pendingFocus;
@@ -294,6 +337,8 @@ export class MapView2D {
     this.raf = 0;
     window.clearTimeout(this.cursorTimer);
     window.clearTimeout(this.toastTimer);
+    window.clearTimeout(this.noticeTimer);
+    window.clearTimeout(this.fitTimer);
     window.removeEventListener('keydown', this.onKeyDown);
     this.unsubscribe?.();
     this.unsubscribe = null;
@@ -321,6 +366,7 @@ export class MapView2D {
     const d = this.dirty;
     let any = false;
     if (s.basemap !== p.basemap) d.basemap = any = true;
+    if (s.basemap !== p.basemap || s.layers.elevation !== p.layers.elevation || s.layers.officialHazard !== p.layers.officialHazard) this.updateNotice();
     if (s.layers !== p.layers) {
       d.layers = any = true;
       if (s.layers.shelters !== p.layers.shelters) d.shelters = true;
@@ -329,6 +375,11 @@ export class MapView2D {
     }
     if (s.terrain.grid !== p.terrain.grid || s.params.resolution !== p.params.resolution) {
       d.domain = d.flood = d.growing = d.people = d.routes = d.layers = d.attribution = any = true;
+    }
+    if (s.sim.output !== p.sim.output || s.terrain.grid !== p.terrain.grid) {
+      // 表示しなくなった計算結果への参照を手放す（非表示のレイヤー・浸水の参照データ・人物の直近の状態）。
+      // 地図を表示していない間（3D 表示中）も行う
+      this.dropStaleOutputs(this.simData(s)?.output ?? null);
     }
     if (s.sim.output !== p.sim.output) {
       d.flood = d.growing = d.people = d.routes = d.layers = any = true;
@@ -503,7 +554,7 @@ export class MapView2D {
       d.people = false;
       step('people', () => people.update(this.peopleContext(s)));
     }
-    if (d.routes && people && now - this.lastRoutes >= ROUTE_INTERVAL_MS) {
+    if (d.routes && people && now - this.lastRoutes >= (s.time.playing ? ROUTE_INTERVAL_PLAYING_MS : ROUTE_INTERVAL_MS)) {
       d.routes = false;
       this.lastRoutes = now;
       step('routes', () => {
@@ -533,13 +584,32 @@ export class MapView2D {
     };
   }
 
-  /** 表示に使えるシミュレーション結果（地形とグリッドが一致しているときだけ） */
+  /** 表示に使えるシミュレーション結果（今の地形の格子の上で計算した結果だけ） */
   private simData(s: AppState): { grid: TerrainGrid; output: SimOutput } | null {
     const grid = s.terrain.grid;
-    const output = s.sim.output;
+    const output = usableOutput(s);
     if (!grid || !output) return null;
     if (!specsMatch(grid.spec, output.spec)) return null;
     return { grid, output };
+  }
+
+  /**
+   * current 以外の計算結果への参照を手放す。非表示のレイヤー（最大浸水深・到達時間・浸水を切っている間）は
+   * 描き直されないので、放っておくと前の計算結果（全フレーム）がメモリに残り続ける。
+   * 画像ソースの中身（キャンバス）はそのまま。applyLayers は結果の一致しないレイヤーを表示しない。
+   */
+  private dropStaleOutputs(current: SimOutput | null): void {
+    let changed = false;
+    for (const r of Object.values(this.rasters)) {
+      if (r.output && r.output !== current) {
+        r.output = null;
+        r.key = '';
+        changed = true;
+      }
+    }
+    if (this.ref && this.ref.output !== current) this.ref = null;
+    this.people?.dropOutput(current);
+    if (changed) this.dirty.layers = true;
   }
 
   private currentSpec(s: AppState): GridSpec {
@@ -646,7 +716,8 @@ export class MapView2D {
     const n = grid.spec.nx * grid.spec.ny;
     if (this.depthBuf.length !== n) this.depthBuf = new Float32Array(n);
     if (!this.ref || this.ref.output !== output || this.ref.grid !== grid) {
-      this.ref = buildFloodReference(grid, output, this.depthBuf, s.params.tideTP);
+      // 基準の潮位は出力から推定する（推定できないときは、表示中の結果を計算した条件の潮位）
+      this.ref = buildFloodReference(grid, output, this.depthBuf, resultParams(s).tideTP);
       this.rasters.flood.key = '';
     }
     return this.ref;
@@ -854,7 +925,49 @@ export class MapView2D {
     }
     this.hint.style.top = `${top}px`;
     const hintH = this.hint.hidden ? 0 : this.hint.offsetHeight + 6;
-    this.toast.style.top = `${top + (hintH || 0)}px`;
+    this.notice.style.top = `${top + hintH}px`;
+    const noticeH = this.notice.hidden ? 0 : this.notice.offsetHeight + 6;
+    this.toast.style.top = `${top + hintH + noticeH}px`;
+    this.fitControls();
+  }
+
+  /**
+   * 狭い画面・タッチ操作では、ズームのボタンを指で押しやすい大きさ（幅 40px）にする。
+   * 高さは、下にある「場所を探す」ボタン（UI 担当、#hud .maptools）と重ならない範囲で最大 40px。
+   */
+  private fitControls(): void {
+    try {
+      const group = this.root.querySelector<HTMLElement>('.maplibregl-ctrl-top-right .maplibregl-ctrl-group');
+      if (!group) return;
+      const touch = typeof matchMedia === 'function' && matchMedia('(max-width: 819.98px), (pointer: coarse)').matches;
+      if (!touch) {
+        this.root.style.removeProperty('--m2d-zoom-h');
+        return;
+      }
+      // 揺れのアニメーション中は地図が拡大・移動しているので測らない（終わってから測り直す）
+      const view = this.root.parentElement;
+      if (view && getComputedStyle(view).transform !== 'none') {
+        window.clearTimeout(this.fitTimer);
+        this.fitTimer = window.setTimeout(() => this.fitControls(), 500);
+        return;
+      }
+      // 「場所を探す」ボタンが見つからない・見えていない（大きさが測れない）間は変えない
+      // （HUD の描き直しの途中などで一時的に無いことがある。既定は CSS の 29px）
+      const tools = document.querySelector<HTMLElement>('#hud .maptools');
+      if (!tools) return;
+      const tr = tools.getBoundingClientRect();
+      const gr = group.getBoundingClientRect();
+      if (tr.height <= 0 || gr.height <= 0) return;
+      let h = TOUCH_TARGET_PX;
+      if (tr.left < gr.right && tr.right > gr.left) {
+        // ボタンは 2 つ（拡大・縮小）と区切り線 1px。下のボタンとの間は 6px 空ける
+        const room = tr.top - gr.top - 6 - 1;
+        h = Math.max(29, Math.min(TOUCH_TARGET_PX, Math.floor(room / 2)));
+      }
+      this.root.style.setProperty('--m2d-zoom-h', `${h}px`);
+    } catch {
+      // 見た目だけの調整なので失敗しても続ける
+    }
   }
 
   private showToast(msg: string): void {
@@ -874,6 +987,13 @@ export class MapView2D {
     if (e.sourceId || e.tile) {
       // 公式ハザードマップは浸水想定のない区域のタイルが 404 になるのが通常なので記録しない
       if (err?.status === 404 && e.sourceId === IDS.hazard) return;
+      // タイルが存在しない（404 など）のではなく、取得できなかった: 地図の上に知らせる
+      if (e.sourceId && this.noticeSource(e.sourceId) && err?.status !== 404 && err?.status !== 204) {
+        const t = this.tileTrouble.get(e.sourceId) ?? { failedAt: 0, okAt: 0 };
+        t.failedAt = performance.now();
+        this.tileTrouble.set(e.sourceId, t);
+        this.updateNotice();
+      }
       const key = `tile:${e.sourceId ?? '?'}:${err?.status ?? 'network'}`;
       if (!this.loggedErrors.has(key)) {
         this.loggedErrors.add(key);
@@ -883,6 +1003,75 @@ export class MapView2D {
     }
     this.logOnce(`map:${err?.message ?? String(e.error)}`, e.error);
   };
+
+  /** タイルを取得できたとき: 取得できない状態が続いていなければ案内を消す */
+  private onSourceData = (e: { sourceId?: string; tile?: unknown }): void => {
+    if (!e.sourceId || !e.tile) return;
+    const t = this.tileTrouble.get(e.sourceId);
+    if (!t) return;
+    t.okAt = performance.now();
+    this.updateNotice();
+  };
+
+  /** 案内の対象のソースか（背景地図・色別標高・公式ハザードマップ） */
+  private noticeSource(sourceId: string): NoticeSource | null {
+    if (sourceId.startsWith('m2d-base-')) return 'basemap';
+    if (sourceId === IDS.relief) return 'relief';
+    if (sourceId === IDS.hazard) return 'hazard';
+    return null;
+  }
+
+  /** タイルを取得できない案内を更新（表示中のソースで、最後に失敗してから取得できていないもの） */
+  private updateNotice(): void {
+    window.clearTimeout(this.noticeTimer);
+    this.noticeTimer = 0;
+    const s = this.store.get();
+    const now = performance.now();
+    const shown = new Set<NoticeSource>();
+    let pending = false;
+    for (const [id, t] of this.tileTrouble) {
+      const kind = this.noticeSource(id);
+      if (!kind) continue;
+      const visible = kind === 'basemap' ? id === basemapLayerId(s.basemap) : kind === 'relief' ? s.layers.elevation : s.layers.officialHazard;
+      if (!visible) continue;
+      const recovered = t.okAt > t.failedAt;
+      if (recovered && now - t.failedAt >= TILE_RECOVER_MS) {
+        this.tileTrouble.delete(id);
+        continue;
+      }
+      if (recovered) pending = true;
+      shown.add(kind);
+    }
+    // 取得できるようになったら、少し待って（続けて失敗しないことを確かめて）消す
+    if (pending) this.noticeTimer = window.setTimeout(() => this.updateNotice(), TILE_RECOVER_MS);
+    const kinds = (['basemap', 'relief', 'hazard'] as NoticeSource[]).filter((k) => shown.has(k));
+    const key = kinds.join(',');
+    if (key === this.noticeKey) return;
+    this.noticeKey = key;
+    if (kinds.length === 0) {
+      this.notice.hidden = true;
+      this.noticeText.textContent = '';
+    } else {
+      const tail = kinds.includes('basemap') ? '通信状態を確認してください。浸水の計算と避難場所の表示は続けられます。' : '通信状態を確認してください。';
+      this.noticeText.textContent = `${kinds.map((k) => NOTICE_TEXT[k]).join('')}${tail}`;
+      this.notice.hidden = false;
+    }
+    this.placeOverlays();
+  }
+
+  /** 取得できなかったタイルを読み込み直す */
+  private retryTiles(): void {
+    const map = this.map;
+    if (!map) return;
+    for (const id of this.tileTrouble.keys()) {
+      const src = map.getSource(id) as Partial<Pick<RasterTileSource, 'setTiles' | 'tiles'>> | undefined;
+      try {
+        if (src?.setTiles && src.tiles) src.setTiles([...src.tiles]);
+      } catch (e) {
+        this.logOnce(`retry:${id}`, e);
+      }
+    }
+  }
 
   private logOnce(key: string, e: unknown): void {
     if (this.loggedErrors.has(key)) return;

@@ -29,6 +29,30 @@ export const SHELTER_SOURCE_LABEL = '国土地理院 指定緊急避難場所デ
 export const SHELTER_SOURCE_URL = 'https://www.gsi.go.jp/bousaichiri/hinanbasho.html';
 export const SHELTER_BUILTIN_SOURCE_LABEL = '国土地理院 指定緊急避難場所データ（津波）※内蔵の写し（2026年8月時点）';
 
+/**
+ * 藤沢市「津波避難ビル」（市が独自に指定している津波避難ビルの一覧。2025年12月18日更新の PDF で市全体 141 件）。
+ * ページの題名「津波避難ビル｜藤沢市」を 2026-09-24 に確認。
+ */
+export const FUJISAWA_TSUNAMI_BUILDING_URL = 'https://www.city.fujisawa.kanagawa.jp/kikikanri/bosai/bosai/tunamihinanbiruichiran.html';
+export const FUJISAWA_TSUNAMI_BUILDING_LABEL = '藤沢市「津波避難ビル」一覧';
+
+/**
+ * 指定緊急避難場所データの「ご利用上の注意」（地理院タイル一覧 https://maps.gsi.go.jp/development/ichiran.html の
+ * 指定緊急避難場所の備考。原文は docs/DATA_SOURCES.md 5 章）の要点。
+ * 注意 4.「本データを用いた情報を第三者に提供する場合は、上記1．～3．の注意事項が正確に伝わるよう、十分にご留意ください。」
+ * に従い、避難場所を表示する画面（出典の欄・人物の避難先）で伝える:
+ *   1. 市町村が指定・登録した情報で、最新でない場合や未掲載の場合がある → 最新の情報は市町村（藤沢市）で確認
+ *   2. 「指定緊急避難場所」と「指定避難所」は違う。指定緊急避難場所は災害の種類ごとに指定されている
+ *   3. 随時更新される（画面の避難場所は取得した時点のもの）
+ */
+export const SHELTER_USAGE_NOTICE =
+  '表示しているのは、市町村が指定して国土地理院に登録した「指定緊急避難場所」のうち津波に対応するもので、避難生活のための「指定避難所」とは別のものです。' +
+  'データは随時更新され、最新でない場合や掲載されていない場合があります。最新の情報は藤沢市で確認してください。';
+
+/** 藤沢市の津波避難ビルがこのデータにほとんど含まれないこと（docs/DATA_SOURCES.md 5 章: 計算範囲の 7 か所と重なるのは 5 件だけ） */
+export const SHELTER_BUILDING_NOTE =
+  '藤沢市が独自に指定している津波避難ビルの多くは、このデータに含まれていません。人物の「最寄りの避難場所へ」の経路は、近くに津波避難ビルがあっても、このデータの避難場所へ向かいます。';
+
 /** GeoJSON タイルの URL テンプレート（先頭から順に試す） */
 export const SHELTER_TILE_URLS = [
   'https://cyberjapandata.gsi.go.jp/xyz/skhb05/{z}/{x}/{y}.geojson',

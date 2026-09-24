@@ -8,7 +8,7 @@ URL・ズーム範囲・出典表記・配色は公式の資料で確かめ、�
 > （https://www.city.fujisawa.kanagawa.jp/bousai/bosai/bosai/hazardmap/tsunami/h25hazardmap.html ）を使ってください。
 
 コードでの定義: `src/data/sources.ts`（タイル・出典・配色）、`src/data/poi.ts`（地点）、
-`src/data/shelters.ts`（避難場所）、`src/data/scenarios.ts`（シナリオ）。
+`src/data/shelters.ts`（避難場所）、`src/data/scenarios.ts`（シナリオ）、`src/ui/geoSearch.ts`（地名検索・逆ジオコーダー）。
 
 ---
 
@@ -22,11 +22,15 @@ URL・ズーム範囲・出典表記・配色は公式の資料で確かめ、�
 | 地理院タイル 標高タイル（DEM） | 計算用の地形（陸の標高） | `https://cyberjapandata.gsi.go.jp/xyz/dem5a_png/{z}/{x}/{y}.png` ほか | 出典の記載のみで利用可（加工した旨も記載） | 「地理院タイル（標高タイル（基盤地図情報数値標高モデル））を加工して作成」 |
 | 国土地理院 標高API | 地点（POI）の標高の記録 | `https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php` | 過度の負担をかけないこと | 地点の出典に記載 |
 | 重ねるハザードマップ 津波浸水想定 | 公式の浸水想定の重ね表示・凡例 | `https://disaportaldata.gsi.go.jp/raster/04_tsunami_newlegend_data/{z}/{x}/{y}.png` | 公共データ利用規約（第1.0版）。商用・非商用とも可、出典の記載が必要 | 「ハザードマップポータルサイト」（津波浸水想定：神奈川県） |
-| 指定緊急避難場所（津波） skhb05 | 避難場所の表示・避難経路の目的地 | `https://cyberjapandata.gsi.go.jp/xyz/skhb05/{z}/{x}/{y}.geojson` | 国土地理院コンテンツ利用規約＋「ご利用上の注意」への同意 | 「国土地理院 指定緊急避難場所データ（津波）」 |
+| 指定緊急避難場所（津波） skhb05 | 避難場所の表示・避難経路の目的地 | `https://cyberjapandata.gsi.go.jp/xyz/skhb05/{z}/{x}/{y}.geojson` | 国土地理院コンテンツ利用規約＋「ご利用上の注意」への同意（第三者に提供するときは注意事項が正確に伝わるようにする: 5 章） | 「国土地理院 指定緊急避難場所データ（津波）」＋ご利用上の注意の要点・津波避難ビルが含まれないこと |
+| 国土地理院 地名検索API | 地名・住所の検索（地図の「地名・住所で探す」） | `https://msearch.gsi.go.jp/address-search/AddressSearch?q={文字列}` | 地理院地図のための機能（常に・長期的な提供は保証されない。仕様は予告なく変わりうる: 12 章）。検索機能の一部（住所）は東京大学 CSIS「シンプルジオコーディング実験」による | 「国土地理院 地名検索API（協力: 東大CSIS「シンプルジオコーディング実験」）」 |
+| 国土地理院 逆ジオコーダー | 人物の場所の住所（町字）の目安 | `https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress?lat={緯度}&lon={経度}` | 同上 | 「国土地理院 逆ジオコーダー」 |
 | OpenFreeMap（OpenStreetMap） | 3D の建物 | TileJSON `https://tiles.openfreemap.org/planet` | 無料（閲覧数・リクエスト数の制限なし、登録不要）・無保証。地図データは OpenStreetMap（ODbL） | OpenFreeMap © OpenMapTiles Data from OpenStreetMap |
 | OpenStreetMap（Nominatim で確認） | 地点（駅など）の位置 | https://www.openstreetmap.org/ | ODbL | © OpenStreetMap contributors |
 
 すべてのタイル・API は、ブラウザと同じく `Origin` ヘッダーを付けた要求に対して `Access-Control-Allow-Origin: *` を返す（2026-09-24 に確認。`Origin` なしの要求では地理院タイルはこのヘッダーを返さない）ので、ブラウザから直接読み込める。
+
+サイトに含まれるライブラリ（MapLibre GL JS・three.js など）のライセンス表示は `public/THIRD_PARTY_LICENSES.txt` にある（13 章）。
 
 ---
 
@@ -148,7 +152,9 @@ https://disaportal.gsi.go.jp/hazardmapportal/hazardmap/copyright/copyright.html
 
 ### 津波到達時間の配色（このアプリの設定）
 
-公式の凡例ではない。相模トラフ沿いの海溝型地震（西側モデル）では、藤沢市への第1波の到達が6分、藤沢海岸（茅ヶ崎市境〜片瀬漁港海岸西側。鵠沼を含む）の最大津波到達が8分、湘南港海岸（江の島）が12分（藤沢市「藤沢市における想定津波の概要」 https://www.city.fujisawa.kanagawa.jp/documents/30834/souteitsunamigaiyou.pdf 。県の表では藤沢市の代表値が 11.5m・12分: 「津波浸水想定について（解説）」p.14 表1）なので、10〜30分を5分刻みで区別できるようにした。
+公式の凡例ではない。塗り分けるのは計算結果の **各地点に最初に 1 cm 以上浸水した時刻**（`SimOutput.arrival`）で、
+シナリオの「最大波の到達」（公的資料の最大津波到達時間など。最大の波が海岸に来る時刻）とは別の値である。
+相模トラフ沿いの海溝型地震（西側モデル）では、藤沢市への第1波の到達が6分、藤沢海岸（茅ヶ崎市境〜片瀬漁港海岸西側。鵠沼を含む）の最大津波到達が8分、湘南港海岸（江の島）が12分（藤沢市「藤沢市における想定津波の概要」 https://www.city.fujisawa.kanagawa.jp/documents/30834/souteitsunamigaiyou.pdf 。県の表では藤沢市の代表値が 11.5m・12分: 「津波浸水想定について（解説）」p.14 表1）なので、10〜30分を5分刻みで区別できるようにした。
 色は viridis 配色（matplotlib `_viridis_data` の 256 色を 0, 1/6, …, 1 の位置で抜き出した7色。明度が単調に変わり、色の区別がつきにくくても明暗で順序が読める）で、早いほど暗い。最も遅い階級の黄は浸水深の「0.3m未満」の淡黄と似ているので、両方を同時に重ねない。
 
 | 到達 | 色 |
@@ -171,13 +177,25 @@ https://disaportal.gsi.go.jp/hazardmapportal/hazardmap/copyright/copyright.html
 - ズームレベル: 10 のみ（地理院地図での表示は 11〜18）。確認: z10 x=908 y=404 が 200（91 件）、z11 は 404。計算範囲はこの1タイルに収まる。
 - 属性: `name`（施設・場所名）、`address`（住所）、`remarks`（備考）、`disaster5`（津波の指定 = 1）。
 - 計算範囲内は7か所（2026-09-24 取得）: 江の島サムエル・コッキング苑（亀ヶ岡広場含む）、高砂小学校、市営鵠沼住宅、湘南学園中学校・高等学校、湘洋中学校、片瀬山公園、片瀬小学校。`src/data/shelters.ts` の内蔵の写しと一致。
-- 利用条件（地理院タイル一覧の「ご利用上の注意」。内容に同意した場合のみ利用可）:
-  1. 市町村長が指定した情報を各市町村が登録したもので、最新でない場合や未掲載の場合がある。最新かつ詳細は当該市町村に確認すること。
-  2. 「指定緊急避難場所」と「指定避難所」の違い、指定緊急避難場所が災害種別ごとに指定されていることを理解して使うこと。
-  3. データは随時更新される。
-  4. 第三者に提供する場合は、上記の注意が正確に伝わるようにすること。
-  → 画面に「最新の情報は藤沢市で確認」の注意を出す。
-- 藤沢市が独自に指定している「津波避難ビル」の多くはこのデータに含まれない（藤沢市 津波避難ビル一覧: https://www.city.fujisawa.kanagawa.jp/kikikanri/bosai/bosai/tunamihinanbiruichiran.html ）。
+- 利用条件: 地理院タイル一覧の「指定緊急避難場所」の備考に「国土地理院コンテンツ利用規約のほか、以下のご利用上の注意をご確認いただき、内容に同意された場合のみご利用ください。」とある。
+  【ご利用上の注意】（原文。2026-09-24 に確認）
+  1. 「本データは、災害対策基本法第49条の4・第49条の7に基づき市町村長が指定した指定緊急避難場所・指定避難所の情報を各市町村に登録いただいたものです。なお、最新でない場合や未掲載の場合があるため、最新かつ詳細の状況などは必ず当該市町村にご確認ください。」
+  2. 「「指定緊急避難場所」と「指定避難所」の違いや、指定緊急避難場所が災害種別ごとに指定されていることを理解した上でご利用ください。」
+  3. 「本データは随時更新されますので、ダウンロードや印刷等を行い利用される場合は、ご注意ください。」
+  4. 「本データを用いた情報を第三者に提供する場合は、上記1．～3．の注意事項が正確に伝わるよう、十分にご留意ください。」
+- 本アプリはこのデータを画面に表示し、人物の避難先にも使う（＝第三者への提供に当たる）ので、4. に従って 1.〜3. の要点を利用者に伝える必要がある:
+  - 市町村（藤沢市）が登録した情報で、最新でない場合や掲載されていない場合があること。最新の避難場所は藤沢市で確認すること（1.）。
+  - 表示しているのは **津波** の指定緊急避難場所（`disaster5 = 1`）で、避難生活のための「指定避難所」とは別のものであること（2.）。
+  - 画面の避難場所は取得時点（取得できない場合は内蔵の写し: 2026-09-24 取得）のもので、随時更新されること（3.）。
+  - 加えて、藤沢市が独自に指定している **津波避難ビルは、このデータにはほとんど含まれない** こと（下記）。
+  README・docs/MODEL.md にも同じ注意を書いている。
+  → 画面でも、避難場所の出典の欄（「情報」・「レイヤー」・「人物」タブ）と避難場所の説明（2D のポップアップ・3D の説明）に、この要点を表示すること
+  （避難場所の名前・住所・出典だけを表示して、注意を伝えないのは 4. に反する）。
+- 藤沢市が独自に指定している「津波避難ビル」の多くはこのデータに含まれない。藤沢市の津波避難ビル一覧（2025年12月18日更新。
+  https://www.city.fujisawa.kanagawa.jp/kikikanri/bosai/bosai/tunamihinanbiruichiran.html の PDF）には市全体で 141 件があり
+  （うち 1 件は建て替えのため一時使用停止中）。このデータの計算範囲の 7 か所と重なるのは、高砂小学校・湘洋中学校・片瀬小学校の校舎、市営鵠沼住宅、湘南学園の 5 件だけ
+  （名称・所在地で照合。2026-09-24）。
+  人物の「最寄りの避難場所へ」の経路は、近くに津波避難ビルがあっても、このデータの避難場所へ向かう。
 
 ---
 
@@ -273,6 +291,15 @@ https://disaportal.gsi.go.jp/hazardmapportal/hazardmap/copyright/copyright.html
 - 気象庁「気象庁震度階級関連解説表」 https://www.jma.go.jp/jma/kishou/know/shindo/kaisetsu.html （`src/data/intensity.ts`）
 - 気象庁「気象庁ホームページにおける気象情報の配色に関する設定指針」（平成24年5月） https://www.jma.go.jp/jma/kishou/info/colorguide/120524_hpcolorguide.pdf （震度・津波警報の表示色）
 - 気象庁「津波警報・注意報、津波情報、津波予報について」 https://www.jma.go.jp/jma/kishou/know/jishin/joho/tsunamiinfo.html （`src/data/warnings.ts`）
+- 人物の避難の評価（`src/people/profiles.ts`。詳しくは docs/MODEL.md 5 章）:
+  - 消防庁「市町村における津波避難計画策定指針」（令和7年3月改訂） https://www.fdma.go.jp/laws/tutatsu/items/tuchi2503/pdf/250311_sai_1-2.pdf
+    p.12: 歩行速度 1.0 m/秒（歩行困難者等は 0.5 m/秒、東日本大震災の平均避難速度 0.62 m/秒も考慮）、「地域の実情に応じて、地震発生後２～５分後に避難開始できるものと想定する」。
+    （平成25年3月版の URL …/h24/tsunami_hinan/houkokusho/p02.pdf は 2026-09-24 に 404）
+  - 内閣府「南海トラフの巨大地震 建物被害・人的被害の被害想定項目及び手法の概要」（平成24年8月） https://www.bousai.go.jp/jishin/nankai/taisaku_wg/pdf/20120829_gaiyou.pdf
+    PDF p.20（資料の頁 19）: 避難開始は直接避難 5 分後・用事後避難 15 分後（昼間）、夜間はさらに 5 分、避難速度 2.65 km/h・夜間は昼間の 80%。
+    PDF p.22（資料の頁 21）: 浸水深 30 cm 以上で死者が発生し始め、1 m では津波に巻き込まれた人のすべてが死亡すると仮定した死者率関数。
+    （以前の URL https://www.bousai.go.jp/jishin/nankai/taisaku/pdf/2_2.pdf は 2026-09-24 に 404。上の URL は内閣府「南海トラフ巨大地震対策検討ワーキンググループ」のページから同じ題名でリンクされている）
+  - 国土交通省「川の防災情報」浸水深と避難行動について https://city.river.go.jp/kawabou/reference/index05.html
 
 ---
 
@@ -292,6 +319,13 @@ curl -s "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php?
 curl -s -o /dev/null -H 'Origin: https://example.com' -w "%header{access-control-allow-origin}\n" https://cyberjapandata.gsi.go.jp/xyz/dem5a_png/15/29078/12943.png  # *
 # 地点の町丁目（国土地理院 逆ジオコーダー）
 curl -s "https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress?lat=35.31617&lon=139.46619"  # 鵠沼海岸四丁目
+# 地名検索API（応答は GeoJSON の Feature の配列）
+curl -s "https://msearch.gsi.go.jp/address-search/AddressSearch?q=%E9%B5%A0%E6%B2%BC%E6%B5%B7%E5%B2%B8%E9%A7%85" | head -c 300   # 鵠沼海岸駅
+# 指定緊急避難場所（津波）の件数（計算範囲に 7 か所）
+curl -s https://cyberjapandata.gsi.go.jp/xyz/skhb05/10/908/404.geojson | python3 -c "import json,sys; f=json.load(sys.stdin)['features']; print(sum(139.44<=x['geometry']['coordinates'][0]<=139.50 and 35.29<=x['geometry']['coordinates'][1]<=35.345 for x in f))"
+# 人物の出典の PDF（200 が返ること）
+curl -s -o /dev/null -w "%{http_code}\n" https://www.bousai.go.jp/jishin/nankai/taisaku_wg/pdf/20120829_gaiyou.pdf
+curl -s -o /dev/null -w "%{http_code}\n" https://www.fdma.go.jp/laws/tutatsu/items/tuchi2503/pdf/250311_sai_1-2.pdf
 ```
 
 www.gsi.go.jp（利用規約・測量成果の利用手続のページ）は古い TLS 再ネゴシエーションが必要で curl では取得できないことがある。
@@ -323,3 +357,51 @@ www.gsi.go.jp（利用規約・測量成果の利用手続のページ）は古�
 - **確かめきれなかったもの**: シナリオの根拠資料（§8）のうち、内閣府の一覧表・萬年ほか（2013）・気象庁月報は、資料の存在と題名・藤沢市の行があることまでを確認し、
   各値のページ番号は `src/data/scenarios.ts` の担当の確認に任せている。
 
+
+### 2 回目の再確認（2026-09-24、最終レビューの指摘への対応）
+
+- 指定緊急避難場所（津波）の「ご利用上の注意」を原文で確認し、5 章に原文と、本アプリが伝える要点を書いた。計算範囲の 7 か所を取り直して確認。
+  藤沢市の津波避難ビル一覧（2025年12月18日更新、141 件）と照合し、重なるのは 5 件だけであることを追記。
+- 地名検索API・逆ジオコーダーの一覧の行と 12 章を追加（出典の書き方、東大CSIS の協力、提供の継続が保証されないこと、送る情報）。
+- 内閣府「被害想定項目及び手法の概要」の URL が 404 になっていたので、同じ資料の現在の URL に直し、ページを確認（9 章）。
+  消防庁の指針（令和7年3月改訂版）p.12 の避難開始の想定は「2〜5分後」で、「2分」はその幅の下限であることを確認。
+- 津波到達時間の配色の説明に、塗り分けるのが各地点の浸水開始時刻であり、シナリオの「最大波の到達」とは別の値であることを追記。
+- サイトに含まれるライブラリのライセンス表示を `public/THIRD_PARTY_LICENSES.txt` として追加（13 章）。
+
+---
+
+## 12. 地名検索API・逆ジオコーダー・現在地
+
+コードでの定義: `src/ui/geoSearch.ts`（検索・逆ジオコーダー）、`src/ui/geolocate.ts`（現在地）、`src/ui/personAddress.ts`（人物の住所の目安）。
+
+| 機能 | URL | 使いみち | 送る情報 |
+| --- | --- | --- | --- |
+| 国土地理院 地名検索API | `https://msearch.gsi.go.jp/address-search/AddressSearch?q={文字列}` | 地図の「地名・住所で探す」 | 入力した文字 |
+| 国土地理院 逆ジオコーダー | `https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress?lat={緯度}&lon={経度}` | 人物の場所の住所（町字）の目安 | 人物の位置の座標（小数第 5 位まで） |
+
+- 地名検索API の応答は GeoJSON の Feature の配列。`properties.dataSource` の無い結果（住所）は、東京大学空間情報科学研究センター（CSIS）の
+  「シンプルジオコーディング実験」（https://geocode.csis.u-tokyo.ac.jp/home/simple-geocoding/ ）による。
+  逆ジオコーダーの応答は `{"results":{"muniCd":"14205","lv01Nm":"鵠沼海岸四丁目"}}` の形（海の上などでは `{}`）。どちらも CORS に対応（2026-09-24 に確認）。
+- 根拠: 国土地理院「地理院地図」のソース（gsimaps）の README の「利用上の留意点」（https://github.com/gsi-cyberjapan/gsimaps ）:
+  - 「検索機能の一部に「東京大学CSIS様のサービス」を利用しておりますことをご承知おきください。」
+  - 「本コンテンツから呼び出すサーバ側動的機能（地名検索機能等）については、主に地理院地図からの利用を想定しているため、必ずしも常にまた長期的に提供できるとは限らないことをご承知おきください。また、当該機能の仕様や利用方法は、予告なく変更する場合があります。」
+  → 失敗しても本体の機能は使えるようにし、画面には提供の継続が保証されない旨を出す（`GSI_API_NOTICE`）。
+- 出典の表示（地理院地図の検索結果の表示にならう）: 「国土地理院 地名検索API（協力: 東大CSIS「シンプルジオコーディング実験」）」「国土地理院 逆ジオコーダー」
+  （「情報」タブの出典・人物の住所の目安の横。`GSI_SEARCH_CREDIT`・`CSIS_CREDIT`・`GSI_REVERSE_CREDIT`）。
+- 地名検索の結果の位置は地図の注記（文字）の位置のことがあり、実物から数百 m 離れる場合がある（7 章: 片瀬江ノ島駅・湘南海岸公園駅で約 400〜450 m）。
+  7 章で位置を確かめた地点と同じ名称の結果は、その位置に置き換える。
+- **現在地**（ブラウザの Geolocation API）: ボタンを押したときだけ 1 回取得する。座標はこの端末の中だけで使い、どこにも送らない。
+  現在地から置いた人物は、あとで動かしても逆ジオコーダーに問い合わせない。
+  ただし、現在地の周辺を地図に表示すると（計算範囲の中なら取得後に地図が現在地へ移動する）、その範囲の地図画像（地理院タイルなど）を配信元から読み込むので、
+  配信元にはおおよその場所（ズーム 16〜17 のタイル 1 枚は約 250〜500 m 四方）が伝わる。地図を動かして同じ範囲を表示した場合と同じで、座標そのものは送らない。
+
+## 13. ライブラリのライセンス表示
+
+- ビルドしたサイトの JavaScript には、MapLibre GL JS（BSD-3-Clause）・three.js（MIT）などのライブラリが含まれる。
+  MIT・BSD 系のライセンスは、配布物に著作権表示とライセンス条文を含めることを求めているので、`public/THIRD_PARTY_LICENSES.txt`
+  （公開したサイトでは `./THIRD_PARTY_LICENSES.txt`）に、配布物に含まれる各パッケージの著作権表示とライセンス条文をまとめている。
+  MapLibre GL JS の配布ファイル（`maplibre-gl/dist`）が内部に含むパッケージ（`@mapbox/tiny-sdf`・`earcut`・`gl-matrix` など）は、その source map の `sources` から調べた。
+- ビルドの設定（`vite.config.ts`）:
+  - `build.rolldownOptions.output.comments.legal = true` で、ライブラリの `@license` のコメント（MapLibre GL JS・three.js の先頭の表示）を最小化後も残す。
+  - `npm run build` のたびに、配布物に含まれる npm パッケージがすべて `public/THIRD_PARTY_LICENSES.txt` に載っているかを確かめ、足りなければビルドを失敗させる。
+  - `npm run licenses` で、実際にビルドに含まれるパッケージから `public/THIRD_PARTY_LICENSES.txt` を作り直す（依存パッケージを更新したとき）。

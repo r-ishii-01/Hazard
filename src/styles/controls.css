@@ -668,6 +668,10 @@ details.notes p {
   line-height: 1.5;
 }
 
+.hazard-status-text > p {
+  margin: 0 0 4px;
+}
+
 .hazard-notice > .icon {
   flex: none;
   margin-top: 2px;
@@ -675,4 +679,21 @@ details.notes p {
 
 .switch-field > .shelters-info {
   margin: -4px 0 var(--sp-3);
+}
+
+/* タッチ操作・狭い画面: 小さいボタン・アイコンのボタン・選択欄を指で押しやすい大きさに（40px 以上） */
+@media (max-width: 819.98px), (pointer: coarse) {
+  .btn-sm {
+    min-height: 40px;
+  }
+
+  .icon-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .select,
+  .select-sm {
+    height: 40px;
+  }
 }

@@ -198,3 +198,21 @@
     font-size: 13.5px;
   }
 }
+
+/* タッチ操作・狭い画面: 2D/3D の切り替えと「ご利用にあたって」を指で押しやすい大きさに（40px 以上） */
+@media (max-width: 819.98px), (pointer: coarse) {
+  .seg-btn {
+    justify-content: center;
+    min-width: 44px;
+    min-height: 40px;
+  }
+
+  .header-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  .seg {
+    padding: 2px;
+  }
+}

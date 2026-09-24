@@ -5,7 +5,7 @@
   grid-template-areas: "play speed main time";
   align-items: center;
   column-gap: var(--sp-3);
-  padding: 0 var(--sp-4) 0 var(--sp-4);
+  padding: 6px var(--sp-4);
   background: var(--surface);
   border-top: 1px solid var(--border);
   box-shadow: 0 -2px 10px rgb(15 27 45 / 0.05);
@@ -56,10 +56,12 @@
   grid-area: main;
   position: relative;
   display: grid;
-  grid-template-rows: 30px 22px auto;
+  grid-template-rows: 30px var(--tl-track-h, 22px) auto;
   row-gap: 4px;
   min-width: 0;
   padding: 0 9px;
+  /* スパークラインの見出しと最大値が重ならないよう、幅で出し分ける（下の @container） */
+  container: tl-main / inline-size;
 }
 
 .tl-spark,
@@ -138,14 +140,14 @@
 .tl-track {
   grid-row: 2;
   position: relative;
-  height: 22px;
+  height: var(--tl-track-h, 22px);
 }
 
 .tl-rail {
   position: absolute;
   left: 0;
   right: 0;
-  top: 8px;
+  top: calc((var(--tl-track-h, 22px) - 6px) / 2);
   height: 6px;
   border-radius: 6px;
   background: var(--surface-3);
@@ -192,7 +194,7 @@
   right: -9px;
   top: 0;
   width: calc(100% + 18px);
-  height: 22px;
+  height: var(--tl-track-h, 22px);
   margin: 0;
   background: transparent;
   -webkit-appearance: none;
@@ -201,19 +203,19 @@
 }
 
 .tl-range::-webkit-slider-runnable-track {
-  height: 22px;
+  height: var(--tl-track-h, 22px);
   background: transparent;
 }
 
 .tl-range::-moz-range-track {
-  height: 22px;
+  height: var(--tl-track-h, 22px);
   background: transparent;
 }
 
 .tl-range::-webkit-slider-thumb {
-  width: 18px;
-  height: 18px;
-  margin-top: 2px;
+  width: var(--tl-thumb, 18px);
+  height: var(--tl-thumb, 18px);
+  margin-top: calc((var(--tl-track-h, 22px) - var(--tl-thumb, 18px)) / 2);
   border: 3px solid var(--accent);
   border-radius: 50%;
   background: #fff;
@@ -223,8 +225,8 @@
 }
 
 .tl-range::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
+  width: calc(var(--tl-thumb, 18px) - 6px);
+  height: calc(var(--tl-thumb, 18px) - 6px);
   border: 3px solid var(--accent);
   border-radius: 50%;
   background: #fff;
@@ -267,7 +269,7 @@
 .tl-hover-line {
   position: absolute;
   top: 0;
-  height: 56px;
+  height: calc(34px + var(--tl-track-h, 22px));
   width: 1px;
   background: rgb(15 27 45 / 0.35);
   pointer-events: none;
@@ -290,22 +292,25 @@
   z-index: 3;
 }
 
-/* 目印のチップ */
+/*
+ * 目印のチップ。入りきらないときは隠さずに折り返す（タイムラインの高さが増える。layout.css）。
+ * 以前は 1 行で overflow: hidden だったため、狭い画面では一部のチップが見えないまま Tab キーで選べた。
+ */
 .tl-chips {
   grid-row: 3;
   display: flex;
-  flex-wrap: nowrap;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 4px 6px;
   min-width: 0;
-  overflow: hidden;
 }
 
 .tl-chip {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   flex: none;
-  height: 22px;
+  height: var(--tl-chip-h, 22px);
   padding: 0 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
@@ -331,6 +336,13 @@
 .tl-chip-time {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
+}
+
+/* スパークラインが狭いとき（タイムラインの幅が狭い画面）は見出しを省き、最大値だけを出す */
+@container tl-main (max-width: 400px) {
+  .spark-label {
+    display: none;
+  }
 }
 
 /* 時刻 */
@@ -367,9 +379,76 @@
   color: var(--ocean-700);
 }
 
-/* ---- モバイル: 1行目に再生・時刻・速度、2行目にスクラバー ---------------------------- */
+/* 中止・失敗で途中までの結果の範囲 */
+.tl-partial {
+  max-width: 180px;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--warn);
+  text-align: right;
+}
+
+/*
+ * ---- 幅の狭いデスクトップ表示（タブレットの縦向き・小さいノート PC など。地図の列が約 740px 未満）----------
+ * 1 行に並べるとスクラバーが 150px 程度まで縮む（90 分で 1px あたり約 40 秒）ので、
+ * モバイルと同じく 1 行目に再生・時刻・速度、2 行目にスパークライン・スクラバー・目印を置く。
+ */
+@media (min-width: 820px) and (max-width: 1099.98px) {
+  #timeline {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "play time speed"
+      "main main main";
+    row-gap: 6px;
+    padding: 8px var(--sp-4) 8px;
+  }
+
+  .tl-play {
+    width: 44px;
+    height: 44px;
+  }
+
+  .tl-time {
+    grid-auto-flow: column;
+    justify-content: start;
+    justify-items: start;
+    align-items: baseline;
+    column-gap: var(--sp-3);
+    min-width: 0;
+  }
+
+  .tl-partial {
+    max-width: none;
+    text-align: left;
+  }
+}
+
+/* ---- タッチ操作（指）: スクラバー・ボタンを押しやすい大きさに ------------------------------- */
+@media (max-width: 819.98px), (pointer: coarse) {
+  #timeline {
+    --tl-track-h: 32px;
+    --tl-thumb: 24px;
+    --tl-chip-h: 30px;
+  }
+
+  .tl-speed-select {
+    height: 40px;
+  }
+
+  /* 目印のチップは見た目より少し広い範囲で押せるように（上下の行と重ならない範囲） */
+  .tl-chip::before {
+    content: "";
+    position: absolute;
+    inset: -2px -3px;
+  }
+}
+
+/* ---- モバイル: 1行目に再生・時刻・速度、2行目にスクラバー、3行目に目印 ------------------------ */
 @media (max-width: 819.98px) {
   #timeline {
+    --tl-track-h: 36px;
+    --tl-chip-h: 32px;
     grid-template-columns: auto minmax(0, 1fr) auto;
     grid-template-areas:
       "play time speed"
@@ -379,18 +458,23 @@
   }
 
   .tl-play {
-    width: 38px;
-    height: 38px;
+    width: 44px;
+    height: 44px;
   }
 
   .tl-play .icon {
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
   }
 
   .tl-time {
     justify-items: start;
     min-width: 0;
+  }
+
+  .tl-partial {
+    max-width: none;
+    text-align: left;
   }
 
   .tl-now {
@@ -402,7 +486,7 @@
   }
 
   .tl-main {
-    grid-template-rows: auto 22px;
+    grid-template-rows: auto var(--tl-track-h) auto;
     row-gap: 2px;
   }
 
@@ -421,7 +505,43 @@
     display: none;
   }
 
+  /*
+   * 目印（揺れ終了・警報の目安・最大波・最初の浸水）は、色の縦線だけでは意味が分からず、
+   * 指ではツールチップも見られないので、名前と時刻のチップを 1 行で横にスクロールできる形で出す。
+   */
   .tl-chips {
+    flex-wrap: nowrap;
+    gap: 6px;
+    margin: 2px -9px 0;
+    padding: 2px 9px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+  }
+
+  .tl-chips::-webkit-scrollbar {
     display: none;
+  }
+
+  /* 入りきらないとき（timeline.ts が is-overflowing を付ける）は右端を薄くして続きがあることを示す */
+  .tl-chips.is-overflowing {
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+  }
+
+  .tl-chips.is-overflowing.is-scrolled-end {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
+  .tl-chip {
+    scroll-snap-align: start;
+    font-size: 12px;
+  }
+
+  /* 1 行なので、上下の余白の分まで押せる範囲を広げる（見た目 32px → 約 40px） */
+  .tl-chip::before {
+    inset: -4px -3px;
   }
 }

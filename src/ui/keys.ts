@@ -37,10 +37,8 @@ export function mountKeys(ctx: UIContext): void {
       if (target?.closest(ARROW_OWNERS)) return;
       e.preventDefault();
       const step = (e.shiftKey ? 60 : 10) * (e.key === 'ArrowLeft' ? -1 : 1);
-      const s = store.get();
-      const out = s.sim.output;
-      const limit = out ? Math.max(0, ctx.watcher.snap.timeReady) : Infinity;
-      actions.seek(Math.min(limit, s.time.t + step));
+      // 計算済みの範囲への制限はコントローラーの seek が行う
+      actions.seek(store.get().time.t + step);
     }
   };
   document.addEventListener('keydown', onKey);
