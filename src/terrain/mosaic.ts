@@ -7,7 +7,8 @@
  *    ※ 河川・池の水面は 5m メッシュでは無効値だが、DEM10B では等高線からの補間値が入っていることがある。
  *      ここで DEM10B に落とすと川が陸になってしまうため、5m メッシュの整備範囲内では DEM10B を使わない。
  * 2. 5m メッシュ系のタイルが1枚も無い（404）場合: DEM10B（z14）の値をその位置で標本化して使う。
- * 3. 取得に失敗したタイルしかなく値が決められない画素は「不明」として数える（多すぎる場合は呼び出し側で合成地形に切り替える）。
+ * 3. 取得に失敗したタイルしかなく値が決められない画素は「不明」とし、unknownMask に記録する
+ *    （水面の NA と区別するため。多すぎる場合は呼び出し側で合成地形に切り替え、少しなら周囲の値で補う）。
  */
 import { TILE_SIZE } from '../core/geo';
 import { DEM10_LAYER, DEM10_ZOOM, DEM5_LAYERS, type DemLayerId } from './gsiDem';
@@ -26,6 +27,8 @@ export interface DemMosaic {
   valid: number;
   /** 取得失敗のため値が不明な画素数（heights は NaN） */
   unknown: number;
+  /** 値が不明な画素のマスク（1 = 不明）。不明な画素が無ければ null */
+  unknownMask: Uint8Array | null;
   /** レイヤー別の採用画素数 */
   used: Record<DemLayerId, number>;
 }
@@ -39,6 +42,7 @@ export function buildMosaic(dom: PixelDomain, z15: TileRange, lookup: TileLookup
   const used = emptyUsage();
   let valid = 0;
   let unknown = 0;
+  let unknownMask: Uint8Array | null = null;
 
   for (let ty = z15.y0; ty <= z15.y1; ty++) {
     for (let tx = z15.x0; tx <= z15.x1; tx++) {
@@ -95,10 +99,13 @@ export function buildMosaic(dom: PixelDomain, z15: TileRange, lookup: TileLookup
             continue;
           }
           // 5m 系はすべて 404 で DEM10B も 404 → 海（データなし）。いずれかが失敗 → 不明
-          if (fiveError || ten !== 'missing') unknown++;
+          if (fiveError || ten !== 'missing') {
+            unknown++;
+            (unknownMask ??= new Uint8Array(heights.length))[k] = 1;
+          }
         }
       }
     }
   }
-  return { domain: dom, heights, valid, unknown, used };
+  return { domain: dom, heights, valid, unknown, unknownMask, used };
 }

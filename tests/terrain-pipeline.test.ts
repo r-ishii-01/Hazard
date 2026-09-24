@@ -4,7 +4,8 @@ import { CELL_INLAND_WATER, CELL_LAND, CELL_SEA } from '../src/core/types';
 import { aggregateToCells } from '../src/terrain/aggregate';
 import { applyBathymetry, offshoreDepth, SHONAN_PROFILE } from '../src/terrain/bathymetry';
 import { buildTerrainGrid, MANNING } from '../src/terrain/build';
-import { bridgeWaterGaps, classifyWater } from '../src/terrain/classify';
+import { classifyWater } from '../src/terrain/classify';
+import { connectSeaWater, fillUnknownCells, seaConnectedPixels } from '../src/terrain/connect';
 import { distanceTransform } from '../src/terrain/distance';
 import { buildMosaic, type TileSlot } from '../src/terrain/mosaic';
 import { demTileRanges, listRequiredDemTiles, pixelDomain } from '../src/terrain/tiles';
@@ -44,7 +45,7 @@ function fromMap(rows: string[]): { elev: Float32Array; nx: number; ny: number }
 }
 
 describe('classifyWater', () => {
-  it('separates sea (touching S/E/W edges, incl. connected rivers) from inland water; islands stay land', () => {
+  it('separates sea (connected to the south edge, incl. rivers) from inland water; islands stay land', () => {
     const { elev, nx, ny } = fromMap([
       '5555~5555', // 0: 川の上流端（北端に接するだけでは海にならない。川は下で海につながる）
       '5555~5555',
@@ -77,6 +78,14 @@ describe('classifyWater', () => {
     expect(r.kind[3 * nx]).toBe(CELL_SEA);
   });
 
+  it('water touching only the east/west edge inland is not sea (e.g. a failed tile strip at the corner)', () => {
+    const { elev, nx, ny } = fromMap(['~~55', '~555', '5555', '~~~~']);
+    const r = classifyWater(elev, nx, ny);
+    expect(r.kind[0]).toBe(CELL_INLAND_WATER);
+    expect(r.kind[nx]).toBe(CELL_INLAND_WATER);
+    expect(r.kind[3 * nx]).toBe(CELL_SEA);
+  });
+
   it('uses the lowest neighbouring land as the pond level', () => {
     const { elev, nx, ny } = fromMap(['9999', '9~~9', '97~9', '9999']);
     const r = classifyWater(elev, nx, ny);
@@ -86,50 +95,151 @@ describe('classifyWater', () => {
   });
 });
 
-describe('bridgeWaterGaps', () => {
-  /** '~' 水面、'p' 水面を 30% 含む陸、'q' 水面を 10% 含む陸、数字 = 陸 */
-  function mapWithFrac(rows: string[]) {
-    const { nx, ny } = { nx: rows[0].length, ny: rows.length };
-    const elev = new Float32Array(nx * ny);
-    const frac = new Float32Array(nx * ny);
-    rows.forEach((row, j) => {
-      for (let i = 0; i < nx; i++) {
-        const ch = row[i];
-        const k = j * nx + i;
-        elev[k] = ch === '~' ? NaN_ : ch === 'p' || ch === 'q' ? 4 : Number(ch);
-        frac[k] = ch === '~' ? 1 : ch === 'p' ? 0.3 : ch === 'q' ? 0.1 : 0;
-      }
-    });
-    return { elev, frac, nx, ny };
-  }
+/** 画素の地図: '~' = 水面(NaN)、'?' = 取得失敗で不明(NaN + unknown)、数字 = 標高 */
+function pixelMap(rows: string[]) {
+  const height = rows.length;
+  const width = rows[0].length;
+  const heights = new Float32Array(width * height);
+  const unknown = new Uint8Array(width * height);
+  rows.forEach((row, y) => {
+    for (let x = 0; x < width; x++) {
+      const ch = row[x];
+      heights[y * width + x] = ch === '~' || ch === '?' ? NaN_ : Number(ch);
+      if (ch === '?') unknown[y * width + x] = 1;
+    }
+  });
+  return { heights, unknown, width, height };
+}
 
-  it('reconnects a river interrupted by partially wet cells, but not across dry land or long gaps', () => {
-    const m = mapWithFrac([
-      '555~5555~55', // 0: 川A（上流）      川B
-      '555p5555q55', // 1: 30% → 橋渡し    10% → しない
-      '555~5555~55', // 2
-      '555p5555~55', // 3: もう1か所途切れ（繰り返しでつながる）
-      '555~5555555', // 4: 川B は乾いた陸で途切れる
-      '55p~ppp5~55', // 5: 海岸の 30% セル（経路でなければ水域にしない）
-      '~~~~~~~~~~~', // 6: 海
+describe('seaConnectedPixels', () => {
+  it('marks NA pixels 4-connected to the south edge, not ponds, diagonal touches or unknown pixels', () => {
+    const m = pixelMap([
+      '5~555555', // 0: 川（海につながる）
+      '5~55~555', // 1: 池（i=4）
+      '5~55~555',
+      '5~555~55', // 3: 斜めにしか接しない水面（i=5）→ 海ではない
+      '5~55?555', // 4: 不明な画素は水面として扱わない
+      '~~~~~~~~', // 5: 海（南端）
     ]);
-    const n = bridgeWaterGaps(m.elev, m.frac, m.nx, m.ny);
-    const r = classifyWater(m.elev, m.nx, m.ny);
-    const at = (i: number, j: number) => r.kind[j * m.nx + i];
-    expect(at(3, 0)).toBe(CELL_SEA); // 川A は海につながった
-    expect(at(3, 1)).toBe(CELL_SEA);
-    expect(at(3, 3)).toBe(CELL_SEA);
-    expect(at(8, 0)).toBe(CELL_INLAND_WATER); // 川B は切れたまま
-    expect(at(8, 3)).toBe(CELL_INLAND_WATER);
-    expect(at(2, 5)).toBe(CELL_LAND); // 海岸線は動かさない
-    expect(at(5, 5)).toBe(CELL_LAND);
-    expect(n).toBe(2);
+    const sea = seaConnectedPixels(m.heights, m.width, m.height, m.unknown);
+    const at = (x: number, y: number) => sea[y * m.width + x];
+    expect(at(1, 0)).toBe(1);
+    expect(at(0, 5)).toBe(1);
+    expect(at(4, 1)).toBe(0);
+    expect(at(5, 3)).toBe(0);
+    expect(at(4, 4)).toBe(0);
+    expect(at(0, 0)).toBe(0); // 陸
+  });
+});
+
+describe('connectSeaWater (keeps thin rivers connected after averaging)', () => {
+  it('reconnects a diagonal 2-px river that the 50% rule splits, but keeps a pond behind a thin dike separate', () => {
+    // 16x16 画素 → 4x4 セル（cellPx = 4）。川は幅2画素で斜めに流れ、セルの段階では角でしか接しない
+    const m = pixelMap([
+      '~~55555555555555', // 0
+      '~~55555555555555',
+      '5~~5555555555~~5', // 2: 右上に池（i=13..14）
+      '55~~555555555~~5',
+      '555~~55555555555', // 4
+      '5555~~5555555555',
+      '55555~~555555555',
+      '555555~~55555555',
+      '5555555~~5555555', // 8
+      '55555555~~555555',
+      '555555555~~55555',
+      '5555555555~~5555',
+      '55555555555~~~~~', // 12
+      '555555555555~~~~',
+      '~~~~~~~~~~~~~~~~',
+      '~~~~~~~~~~~~~~~~',
+    ]);
+    const sea = seaConnectedPixels(m.heights, m.width, m.height);
+    const raw = aggregateToCells(m.heights, 16, 16, 4, 4, 4, { seaPx: sea });
+    const before = classifyWater(Float32Array.from(raw.elev), 4, 4);
+    expect(before.kind[0]).not.toBe(CELL_SEA); // 平均しただけでは上流が切れる
+    const n = connectSeaWater(raw.elev, raw.seaFrac!, 4, 4);
+    expect(n).toBeGreaterThan(0);
+    const isolated = Uint8Array.from(raw.elev, (v, k) => (v !== v && raw.seaFrac![k] === 0 ? 1 : 0));
+    const after = classifyWater(raw.elev, 4, 4, { isolated });
+    // 上流端（左上のセル）から海まで4近傍でつながる
+    expect(after.kind[0]).toBe(CELL_SEA);
+    // 右上の池のセルは水面が半分未満で陸のまま（海につなげない）
+    expect(after.kind[3]).toBe(CELL_LAND);
   });
 
-  it('does not bridge gaps longer than maxGap', () => {
-    const m = mapWithFrac(['5~5', '5p5', '5p5', '5p5', '~~~']);
-    expect(bridgeWaterGaps(m.elev, m.frac, m.nx, m.ny, { maxGap: 2 })).toBe(0);
-    expect(bridgeWaterGaps(m.elev, m.frac, m.nx, m.ny, { maxGap: 3 })).toBe(3);
+  it('does not connect water that is not connected at pixel level (weir / embankment)', () => {
+    const m = pixelMap([
+      '55~~5555',
+      '55~~5555',
+      '55555555', // 堰（画素の段階でも途切れている）
+      '55~~5555',
+      '~~~~~~~~',
+      '~~~~~~~~',
+      '~~~~~~~~',
+      '~~~~~~~~',
+    ]);
+    const sea = seaConnectedPixels(m.heights, m.width, m.height);
+    const raw = aggregateToCells(m.heights, 8, 8, 2, 4, 4, { seaPx: sea });
+    expect(connectSeaWater(raw.elev, raw.seaFrac!, 4, 4)).toBe(0);
+    // セルの段階では堰の下流側のセルと隣り合うが、画素ではつながっていないので海にしない
+    expect(classifyWater(Float32Array.from(raw.elev), 4, 4).kind[1]).toBe(CELL_SEA);
+    const isolated = Uint8Array.from(raw.elev, (v, k) => (v !== v && raw.seaFrac![k] === 0 ? 1 : 0));
+    const r = classifyWater(raw.elev, 4, 4, { isolated });
+    expect(r.kind[1]).toBe(CELL_INLAND_WATER);
+    expect(r.kind[1 * 4 + 1]).toBe(CELL_SEA);
+  });
+
+  it('keeps a pond that only touches a river cell (no sea-connected pixel) as inland water', () => {
+    const elev = new Float32Array([5, NaN_, NaN_, 5, 5, NaN_, 5, 5, NaN_, NaN_, NaN_, NaN_]);
+    const isolated = new Uint8Array(12);
+    isolated[2] = 1; // 川（i=1）に隣接する池のセル
+    const r = classifyWater(elev, 4, 3, { isolated });
+    expect(r.kind[1]).toBe(CELL_SEA);
+    expect(r.kind[2]).toBe(CELL_INLAND_WATER);
+    expect(r.z[2]).toBe(5);
+  });
+});
+
+describe('unknown pixels / cells (failed tiles)', () => {
+  it('aggregates unknown pixels separately from water and reports seaFrac', () => {
+    const m = pixelMap(['1?~~', '3???', '~~~~', '~~~~']);
+    const sea = seaConnectedPixels(m.heights, 4, 4, m.unknown);
+    const raw = aggregateToCells(m.heights, 4, 4, 2, 2, 2, { seaPx: sea, unknownPx: m.unknown });
+    expect(raw.elev[0]).toBeCloseTo(2, 6); // 既知の 1, 3 の平均（不明は水面として数えない）
+    expect(raw.waterFrac[0]).toBe(0);
+    expect(raw.unknownFrac![0]).toBeCloseTo(0.5, 6);
+    expect(Number.isNaN(raw.elev[1])).toBe(true); // 既知の2画素とも水面
+    expect(raw.seaFrac![1]).toBe(0); // 不明な画素を挟むので海とはつながらない
+    expect(raw.seaFrac![2]).toBe(1);
+    expect(raw.unknownCells).toBe(0);
+    const all = aggregateToCells(new Float32Array(4).fill(NaN_), 2, 2, 2, 1, 1, { unknownPx: new Uint8Array(4).fill(1) });
+    expect(all.unknownCells).toBe(1);
+  });
+
+  it('fills unknown cells from their neighbours (land stays land, sea stays sea)', () => {
+    const nx = 6;
+    const ny = 5;
+    const elev = new Float32Array(nx * ny);
+    const unknown = new Uint8Array(nx * ny);
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) elev[j * nx + i] = j < 3 ? 4 + j : NaN_;
+    // 北西の角（陸）と南東（海）が取得失敗
+    for (const [i, j] of [
+      [0, 0],
+      [1, 0],
+      [0, 1],
+      [5, 4],
+    ]) {
+      unknown[j * nx + i] = 1;
+      elev[j * nx + i] = NaN_;
+    }
+    expect(fillUnknownCells(elev, unknown, nx, ny)).toBe(4);
+    expect(elev[0]).toBeGreaterThanOrEqual(4);
+    expect(elev[0]).toBeLessThanOrEqual(6);
+    expect(Number.isFinite(elev[1])).toBe(true);
+    expect(Number.isFinite(elev[nx])).toBe(true);
+    expect(Number.isNaN(elev[4 * nx + 5])).toBe(true);
+    const r = classifyWater(elev, nx, ny);
+    expect(r.kind[0]).toBe(CELL_LAND);
   });
 });
 
@@ -271,6 +381,9 @@ describe('tile ranges and mosaic', () => {
     expect(at(gx + TILE_SIZE + 5, gy + 5)).toBe(7); // 5m 系が無い → DEM10B
     expect(Number.isNaN(at(gx + 2 * TILE_SIZE + 5, gy + 5))).toBe(true); // 失敗 → 不明
     expect(m.unknown).toBeGreaterThan(0);
+    expect(m.unknownMask).not.toBeNull();
+    expect(m.unknownMask![(gy + 5 - dom.originPy) * dom.width + (gx + 2 * TILE_SIZE + 5 - dom.originPx)]).toBe(1);
+    expect(m.unknownMask![(gy - dom.originPy) * dom.width + (gx - dom.originPx)]).toBe(0); // 水面は不明ではない
     expect(m.used.dem5b_png).toBe(1);
     expect(m.used.dem_png).toBeGreaterThan(0);
   });
@@ -304,7 +417,9 @@ describe('performance (after download)', { timeout: 60000 }, () => {
     ] as const) {
       const spec = createGridSpec(res);
       const a = performance.now();
-      const raw = aggregateToCells(m.heights, dom.width, dom.height, spec.cellPx, spec.nx, spec.ny);
+      const sea = seaConnectedPixels(m.heights, dom.width, dom.height, m.unknownMask);
+      const raw = aggregateToCells(m.heights, dom.width, dom.height, spec.cellPx, spec.nx, spec.ny, { seaPx: sea });
+      connectSeaWater(raw.elev, raw.seaFrac!, spec.nx, spec.ny);
       const { grid } = buildTerrainGrid(spec, raw.elev, { source: 'gsi', sourceLabel: 't', isApproximate: false, notes: [] });
       const elapsed = performance.now() - a + (t1 - t0);
       expect(grid.kind.length).toBe(spec.nx * spec.ny);

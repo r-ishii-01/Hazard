@@ -55,8 +55,14 @@ interface FakeOptions {
   offline?: boolean;
   /** GSI が 500 を返すタイル（key） */
   fail?: (key: string) => boolean;
-  /** ミラーの manifest（null = 無し） */
-  manifest?: Record<string, 0 | 1> | null;
+  /** GSI が返す HTTP ステータス（key → ステータス。null なら通常どおり） */
+  status?: (key: string) => number | null;
+  /** 応答を返さず、AbortSignal にも応じない（永久に待つ）要求 */
+  hang?: (key: string) => boolean;
+  /** 応答を返さないが、ブラウザの fetch と同じく AbortSignal で AbortError になる要求 */
+  stall?: (key: string) => boolean;
+  /** ミラーの manifest（null = 無し）。'hang' は manifest の要求が返らない */
+  manifest?: Record<string, 0 | 1> | null | 'hang';
 }
 
 function fakeFetch(opts: FakeOptions = {}) {
@@ -65,11 +71,23 @@ function fakeFetch(opts: FakeOptions = {}) {
     const [layer, z, x, y] = key.split('/');
     return layer === 'dem5b_png' || layer === 'dem5c_png' ? null : tileBytes(layer, +z, +x, +y);
   };
-  const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+  const fetchImpl = (url: string, init?: RequestInit): Promise<Response> => {
+    const m = /(dem5a_png|dem5b_png|dem5c_png|dem_png)\/(\d+)\/(\d+)\/(\d+)\.png$/.exec(url);
+    if (m && url.startsWith('https://cyberjapandata.gsi.go.jp/') && opts.stall?.(`${m[1]}/${m[2]}/${m[3]}/${m[4]}`)) {
+      calls.gsi++;
+      // ブラウザの fetch と同じく、中断されると（async 関数を経由せず）直ちに AbortError で reject する
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+      });
+    }
+    return inner(url, init);
+  };
+  const inner = async (url: string, init?: RequestInit): Promise<Response> => {
     if (init?.signal?.aborted) throw new DOMException('aborted', 'AbortError');
     await Promise.resolve();
     if (url.endsWith('tiles/manifest.json')) {
       calls.manifest++;
+      if (opts.manifest === 'hang') return new Promise<Response>(() => undefined);
       if (!opts.manifest) return new Response('<!doctype html><html></html>', { status: 200, headers: { 'content-type': 'text/html' } });
       return new Response(JSON.stringify({ version: 1, tiles: opts.manifest }), { status: 200 });
     }
@@ -80,6 +98,9 @@ function fakeFetch(opts: FakeOptions = {}) {
       calls.gsi++;
       calls.gsiKeys.push(key);
       if (opts.offline) throw new TypeError('Failed to fetch');
+      if (opts.hang?.(key)) return new Promise<Response>(() => undefined);
+      const st = opts.status?.(key);
+      if (st) return new Response('<html>blocked</html>', { status: st, headers: { 'content-type': 'text/html' } });
       if (opts.fail?.(key)) return new Response('error', { status: 500 });
     } else {
       calls.mirror++;
@@ -115,8 +136,11 @@ describe('loadTerrain with GSI tiles', { timeout: 60000 }, () => {
     const elapsed = performance.now() - t0;
     expect(grid.source).toBe('gsi');
     expect(grid.isApproximate).toBe(false);
+    // 国土地理院コンテンツ利用規約の加工時の記載例に沿った表記
+    expect(grid.sourceLabel).toContain('地理院タイル（標高タイル（基盤地図情報数値標高モデル））を加工して作成');
     expect(grid.sourceLabel).toContain('国土地理院');
     expect(grid.sourceLabel).toContain('DEM5A');
+    expect(grid.notes.some((s) => s.includes('https://maps.gsi.go.jp/development/ichiran.html'))).toBe(true);
     expect(grid.notes.some((s) => s.includes('推定'))).toBe(true);
     expect(grid.z.every((v) => Number.isFinite(v))).toBe(true);
 
@@ -206,6 +230,89 @@ describe('loadTerrain fallback', { timeout: 60000 }, () => {
     const grid = await loadTerrain('coarse', { fetchImpl: f.fetchImpl, decodeImpl: f.decodeImpl, baseUrl: '/', noCache: true });
     expect(grid.source).toBe('synthetic');
     expect(grid.notes[0]).toContain('取得できず');
+  });
+
+  it('gives up after the first request when GSI answers with HTTP errors (e.g. 403 from a proxy)', async () => {
+    const f = fakeFetch({ status: () => 403 });
+    const grid = await loadTerrain('coarse', { fetchImpl: f.fetchImpl, decodeImpl: f.decodeImpl, baseUrl: '/', noCache: true });
+    expect(grid.source).toBe('synthetic');
+    expect(f.calls.gsi).toBe(1);
+  });
+
+  it('does not hang when fetch ignores the AbortSignal (tile and manifest requests)', async () => {
+    const f = fakeFetch({ hang: () => true, manifest: 'hang' });
+    const t0 = performance.now();
+    const grid = await loadTerrain('coarse', { fetchImpl: f.fetchImpl, decodeImpl: f.decodeImpl, baseUrl: '/', noCache: true, timeoutMs: 200 });
+    expect(grid.source).toBe('synthetic');
+    expect(performance.now() - t0).toBeLessThan(10000);
+  });
+
+  it('treats a timeout as a failed tile, not as a user abort (fetch that honours the signal)', async () => {
+    const f = fakeFetch({ stall: () => true });
+    const grid = await loadTerrain('coarse', { fetchImpl: f.fetchImpl, decodeImpl: f.decodeImpl, baseUrl: '/', noCache: true, timeoutMs: 150 });
+    expect(grid.source).toBe('synthetic');
+    expect(grid.notes[0]).toContain('接続できませんでした');
+    expect(f.calls.gsi).toBe(1);
+  });
+
+  it('stops at the overall deadline when tiles never arrive', async () => {
+    // 接続確認の1枚だけ返り、残りは返らない
+    let first = true;
+    const f = fakeFetch({
+      hang: () => {
+        if (first) {
+          first = false;
+          return false;
+        }
+        return true;
+      },
+    });
+    const t0 = performance.now();
+    const grid = await loadTerrain('coarse', {
+      fetchImpl: f.fetchImpl,
+      decodeImpl: f.decodeImpl,
+      baseUrl: '/',
+      noCache: true,
+      timeoutMs: 60000,
+      deadlineMs: 400,
+    });
+    expect(performance.now() - t0).toBeLessThan(10000);
+    expect(grid.source).toBe('synthetic');
+    expect(grid.notes[0]).toContain('時間');
+  });
+
+  it('can be aborted while a request hangs', async () => {
+    const f = fakeFetch({ hang: () => true });
+    const ac = new AbortController();
+    const p = loadTerrain('coarse', { fetchImpl: f.fetchImpl, decodeImpl: f.decodeImpl, baseUrl: '/', noCache: true, signal: ac.signal });
+    setTimeout(() => ac.abort(), 50);
+    await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('remembers an unreachable GSI for a while instead of waiting again on every resolution change', async () => {
+    const f = fakeFetch({ offline: true });
+    const g1 = await loadTerrain('coarse', { fetchImpl: f.fetchImpl, decodeImpl: f.decodeImpl, baseUrl: '/' });
+    expect(g1.source).toBe('synthetic');
+    const n = f.calls.gsi;
+    const g2 = await loadTerrain('standard', { fetchImpl: f.fetchImpl, decodeImpl: f.decodeImpl, baseUrl: '/' });
+    expect(g2.source).toBe('synthetic');
+    expect(f.calls.gsi).toBe(n);
+    expect(g2.notes[0]).toContain('再試行していません');
+  });
+
+  it('fills a failed edge tile from its surroundings instead of turning it into sea', async () => {
+    // 北西の角のタイル（範囲との重なりは 224×24 画素 = 全体の約 0.24%）が DEM5A・DEM10B とも取得失敗
+    const f = fakeFetch({ fail: (key) => key === 'dem5a_png/15/29076/12940' || key === 'dem_png/14/14538/6470' });
+    const grid = await loadTerrain('standard', { fetchImpl: f.fetchImpl, decodeImpl: f.decodeImpl, baseUrl: '/', noCache: true });
+    expect(grid.source).toBe('gsi');
+    const { nx } = grid.spec;
+    let water = 0;
+    for (let j = 0; j < 8; j++) for (let i = 0; i < 60; i++) if (grid.kind[j * nx + i] !== CELL_LAND) water++;
+    expect(water).toBe(0);
+    // 補った値は周囲の陸（北端付近は 2 + (35.345 - 35.312) * 300 ≒ 12 m）に近い
+    expect(grid.z[0]).toBeGreaterThan(10);
+    expect(grid.z[0]).toBeLessThan(14);
+    expect(grid.notes.some((s) => s.includes('補って'))).toBe(true);
   });
 
   it('uses the synthetic terrain when requested', async () => {

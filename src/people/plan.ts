@@ -6,7 +6,7 @@
  * - 'highground': 最寄りの「安全なセル」へ。
  *     シミュレーション結果がある場合 … 一度も浸水せず、海・浸水域から SAFE_BUFFER_M 以上離れた陸。
  *     （計算途中の結果しかない場合は、下記の標高条件も同時に満たすセルに限る＝安全側）
- *     結果がない場合 … 標高 ≥ 海岸での津波高 + 潮位（正の場合）+ HIGHGROUND_MARGIN_M の陸。
+ *     結果がない場合 … 標高 ≥ 海岸での津波高（T.P.。潮位を含む値）+ HIGHGROUND_MARGIN_M の陸。
  *   安全なセルに到達できない場合は、近く（経路コスト FALLBACK_SEARCH_M 以内）で最も高い地点を目指す。
  *
  * 【モデル上の近似】道路網・建物・信号・混雑は考慮せず、陸はどこでも一定速度で歩けるとする。
@@ -91,9 +91,10 @@ export function simCoversMainWave(output: SimOutput, params: SimParams): boolean
 
 /** 'highground' の目標（安全なセル）を作る */
 function highgroundGoal(ctx: GridContext, output: SimOutput | null, params: SimParams, prefix = ''): Goal {
+  // coastHeight は海岸での最大水位 [m, T.P.] で、すでに潮位を含む（公的な「最大津波高」と同じ定義）。
+  // ここで潮位を足すと二重計上になる。
   const coast = Number.isFinite(params.scenario.coastHeight) ? params.scenario.coastHeight : 10;
-  const tide = Number.isFinite(params.tideTP) ? Math.max(0, params.tideTP) : 0;
-  const threshold = coast + tide + HIGHGROUND_MARGIN_M;
+  const threshold = coast + HIGHGROUND_MARGIN_M;
   const z = ctx.grid.z;
   const usable = output && output.framesReady() > 0 && outputMatchesGrid(ctx, output) ? output : null;
   if (usable) {
@@ -112,7 +113,7 @@ function highgroundGoal(ctx: GridContext, output: SimOutput | null, params: SimP
       describe: (k) => ({ name: `${prefix}最寄りの高台（標高 ${z[k].toFixed(1)} m・${basis}）`, kind: 'highground', basis }),
     };
   }
-  const basis = `想定津波高 ${coast.toFixed(1)} m + ${HIGHGROUND_MARGIN_M} m 以上`;
+  const basis = `想定津波高 T.P.${coast.toFixed(1)} m + ${HIGHGROUND_MARGIN_M} m 以上`;
   return {
     mask: heightSafeMask(ctx, threshold),
     describe: (k) => ({ name: `${prefix}最寄りの高台（標高 ${z[k].toFixed(1)} m・${basis}）`, kind: 'highground', basis }),

@@ -10,6 +10,8 @@
  *
  * 同時接続数・タイムアウト・中断（AbortSignal）・進捗通知に対応し、接続できない場合は早めに諦めて
  * TerrainFetchError を投げる（呼び出し側で合成地形に切り替える）。
+ * タイムアウトは fetch が AbortSignal に応じない場合でも効くように、Promise.race で打ち切る。
+ * 全体にも制限時間（deadlineMs）を設け、回線が極端に遅い場合でも読み込みが終わらない状態にならないようにする。
  */
 import {
   DEM10_LAYER,
@@ -44,6 +46,8 @@ export interface DemFetchOptions {
   concurrency?: number;
   /** 1タイルのタイムアウト [ms]（既定 10000） */
   timeoutMs?: number;
+  /** 全体の制限時間 [ms]（既定 60000）。超えたら残りのタイルは取得失敗として扱う */
+  deadlineMs?: number;
   /** ローカルミラーを使うか（既定 true） */
   useMirror?: boolean;
   /** 国土地理院から取得するか（既定 true） */
@@ -62,13 +66,20 @@ export interface DemFetchResult {
   missing: number;
   /** 最終的に取得できなかったタイル数 */
   failed: number;
+  /** 全体の制限時間を超えたため、一部のタイルの取得を打ち切った */
+  timedOut: boolean;
 }
 
-/** 標高タイルを十分に取得できなかったときのエラー（message は利用者向けの日本語） */
+/**
+ * 標高タイルを十分に取得できなかったときのエラー（message は利用者向けの日本語）。
+ * unreachable: 配信元に接続できなかった（しばらく再試行しなくてよい）
+ */
 export class TerrainFetchError extends Error {
-  constructor(message: string) {
+  readonly unreachable: boolean;
+  constructor(message: string, unreachable = false) {
     super(message);
     this.name = 'TerrainFetchError';
+    this.unreachable = unreachable;
   }
 }
 
@@ -78,6 +89,54 @@ export function abortError(): DOMException {
 
 export function isAbortError(e: unknown): boolean {
   return typeof e === 'object' && e !== null && (e as { name?: string }).name === 'AbortError';
+}
+
+/** 打ち切りの理由（Guard.race が投げる） */
+class StopSignal {
+  constructor(readonly reason: 'timeout' | 'cancel') {}
+}
+
+interface Guard {
+  /** fetch に渡す signal（タイムアウト・取消・中断で abort される） */
+  signal: AbortSignal;
+  /** p と打ち切り（タイムアウト・取消・中断）の早い方。中断は AbortError、それ以外は StopSignal で reject */
+  race<T>(p: Promise<T>): Promise<T>;
+  dispose(): void;
+}
+
+/**
+ * 1回の要求の打ち切りを管理する。outer の中断は AbortError、cancel（全体の打ち切り）とタイムアウトは StopSignal。
+ * fetch が signal に応じない実装でも race で確実に打ち切れる（元の Promise の結果は捨てる）。
+ */
+function createGuard(timeoutMs: number, outer: AbortSignal, cancel?: AbortSignal): Guard {
+  const ac = new AbortController();
+  let reject!: (e: unknown) => void;
+  const stopped = new Promise<never>((_, rej) => {
+    reject = rej;
+  });
+  stopped.catch(() => undefined);
+  const stop = (e: unknown) => {
+    // 先に reject して race の結果を確定させてから、fetch を中断する
+    // （中断された fetch 自体も AbortError で reject するが、それを利用者による中断と取り違えないため）
+    reject(e);
+    ac.abort();
+  };
+  const onOuter = () => stop(abortError());
+  const onCancel = () => stop(new StopSignal('cancel'));
+  outer.addEventListener('abort', onOuter, { once: true });
+  cancel?.addEventListener('abort', onCancel, { once: true });
+  const timer = setTimeout(() => stop(new StopSignal('timeout')), timeoutMs);
+  if (outer.aborted) onOuter();
+  else if (cancel?.aborted) onCancel();
+  return {
+    signal: ac.signal,
+    race: <T>(p: Promise<T>) => Promise.race([p, stopped]),
+    dispose: () => {
+      clearTimeout(timer);
+      outer.removeEventListener('abort', onOuter);
+      cancel?.removeEventListener('abort', onCancel);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -157,8 +216,16 @@ async function loadAsImage(blob: Blob): Promise<HTMLImageElement> {
  * （drawImage と getImageData は同期的に続けて呼ぶので、共有キャンバスでも並行デコードで競合しない）
  */
 export async function decodePngInBrowser(blob: Blob): Promise<Uint8ClampedArray> {
+  let bmp: ImageBitmap | null = null;
   if (typeof createImageBitmap === 'function') {
-    const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+    try {
+      bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+    } catch {
+      // オプションに対応しないブラウザなど → <img> で読む
+      bmp = null;
+    }
+  }
+  if (bmp) {
     try {
       const ctx = canvasContext(bmp.width, bmp.height);
       ctx.clearRect(0, 0, bmp.width, bmp.height);
@@ -181,20 +248,33 @@ export async function decodePngInBrowser(blob: Blob): Promise<Uint8ClampedArray>
 
 type FetchOutcome = { slot: TileSlot; network: boolean };
 
-/** 1枚のタイルを取得（タイムアウト・中断つき）。例外は投げず、中断時のみ AbortError を投げる */
-async function fetchOne(url: string, fetchImpl: FetchLike, decode: DecodeImage, timeoutMs: number, signal: AbortSignal): Promise<FetchOutcome> {
-  if (signal.aborted) throw abortError();
-  const ac = new AbortController();
-  const onAbort = () => ac.abort();
-  signal.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
+/**
+ * 1枚のタイルを取得（タイムアウト・取消・中断つき）。例外は投げず、outer の中断時のみ AbortError を投げる。
+ * network: 接続そのものの失敗（オフライン・CORS・DNS・タイムアウトなど）。HTTP のエラー応答は false
+ */
+async function fetchOne(
+  url: string,
+  fetchImpl: FetchLike,
+  decode: DecodeImage,
+  timeoutMs: number,
+  outer: AbortSignal,
+  cancel: AbortSignal,
+): Promise<FetchOutcome> {
+  if (outer.aborted) throw abortError();
+  if (cancel.aborted) return { slot: 'error', network: true };
+  const g = createGuard(timeoutMs, outer, cancel);
+  const fail = (e: unknown, network: boolean): FetchOutcome => {
+    // 中断として扱うのは呼び出し側（outer）の中断だけ。タイムアウト・全体の打ち切りで fetch が
+    // AbortError になった場合は「取得失敗」
+    if (outer.aborted) throw abortError();
+    return { slot: 'error', network: network || e instanceof StopSignal || isAbortError(e) };
+  };
   try {
     let res: Response;
     try {
-      res = await fetchImpl(url, { signal: ac.signal, mode: 'cors', credentials: 'omit' });
-    } catch {
-      if (signal.aborted) throw abortError();
-      return { slot: 'error', network: true };
+      res = await g.race(fetchImpl(url, { signal: g.signal, mode: 'cors', credentials: 'omit' }));
+    } catch (e) {
+      return fail(e, true);
     }
     if (res.status === 404) return { slot: 'missing', network: false };
     if (!res.ok) return { slot: 'error', network: false };
@@ -202,22 +282,19 @@ async function fetchOne(url: string, fetchImpl: FetchLike, decode: DecodeImage, 
     if (type.includes('text/html')) return { slot: 'error', network: false };
     let blob: Blob;
     try {
-      blob = await res.blob();
-    } catch {
-      if (signal.aborted) throw abortError();
-      return { slot: 'error', network: true };
+      blob = await g.race(res.blob());
+    } catch (e) {
+      return fail(e, true);
     }
     try {
-      const rgba = await decode(blob);
+      const rgba = await g.race(decode(blob));
       if (rgba.length !== DEM_TILE_SIZE * DEM_TILE_SIZE * 4) return { slot: 'error', network: false };
       return { slot: decodeDemTile(rgba), network: false };
-    } catch {
-      if (signal.aborted) throw abortError();
-      return { slot: 'error', network: false };
+    } catch (e) {
+      return fail(e, false);
     }
   } finally {
-    clearTimeout(timer);
-    signal.removeEventListener('abort', onAbort);
+    g.dispose();
   }
 }
 
@@ -270,11 +347,14 @@ export async function fetchDemMosaic(opts: DemFetchOptions = {}): Promise<DemFet
   const skipKnownMissing = opts.skipKnownMissing ?? true;
   const report = (f: number, msg: string) => opts.onProgress?.(Math.max(0, Math.min(1, f)), msg);
 
-  // 内部の中断（接続できないと判断したら残りを止める）
-  const internal = new AbortController();
-  const onOuterAbort = () => internal.abort();
-  outer.addEventListener('abort', onOuterAbort, { once: true });
-  const signal = internal.signal;
+  const deadlineMs = opts.deadlineMs ?? 60000;
+  // 全体の制限時間を過ぎたら、残りの要求を取り消す（取消されたタイルは取得失敗として扱う）
+  const cancel = new AbortController();
+  let deadlineHit = false;
+  const deadlineTimer = setTimeout(() => {
+    deadlineHit = true;
+    cancel.abort();
+  }, deadlineMs);
 
   try {
     const dom = pixelDomain();
@@ -287,20 +367,14 @@ export async function fetchDemMosaic(opts: DemFetchOptions = {}): Promise<DemFet
     const base = opts.baseUrl ?? defaultBaseUrl();
     if (opts.useMirror ?? true) {
       report(0.01, 'ローカルに保存した標高タイルを確認中…');
+      const g = createGuard(Math.min(timeoutMs, 5000), outer, cancel.signal);
       try {
-        const ac = new AbortController();
-        const timer = setTimeout(() => ac.abort(), Math.min(timeoutMs, 5000));
-        const onAbort = () => ac.abort();
-        signal.addEventListener('abort', onAbort, { once: true });
-        try {
-          const res = await fetchImpl(joinUrl(base, 'tiles/manifest.json'), { signal: ac.signal, cache: 'no-cache' });
-          if (res.ok) manifest = parseManifest(await res.text());
-        } finally {
-          clearTimeout(timer);
-          signal.removeEventListener('abort', onAbort);
-        }
+        const res = await g.race(fetchImpl(joinUrl(base, 'tiles/manifest.json'), { signal: g.signal, cache: 'no-cache' }));
+        if (res.ok) manifest = parseManifest(await g.race(res.text()));
       } catch {
         manifest = null;
+      } finally {
+        g.dispose();
       }
       if (outer.aborted) throw abortError();
     }
@@ -309,13 +383,16 @@ export async function fetchDemMosaic(opts: DemFetchOptions = {}): Promise<DemFet
     if (!manifest && (!useRemote || offline)) {
       throw new TerrainFetchError(
         offline ? 'オフラインのため国土地理院の標高タイルを取得できません。' : '標高タイルの取得先がありません。',
+        offline,
       );
     }
 
     let fromMirror = 0;
     let fromRemote = 0;
+    /** 国土地理院から正常な応答（タイル または 404）を得た回数 */
     let remoteOk = 0;
-    let remoteNetErrors = 0;
+    /** 国土地理院への要求が失敗した回数（接続失敗・HTTP エラーとも） */
+    let remoteErrors = 0;
     let remoteDisabled = !useRemote;
 
     /** 要求しなくても「データなし」と分かっているタイル（ミラーの記録、または確認済みの 404） */
@@ -328,19 +405,19 @@ export async function fetchDemMosaic(opts: DemFetchOptions = {}): Promise<DemFet
       if (knownMissing(t)) return 'missing';
       const m = manifest?.tiles[tileKey(t.layer, t.z, t.x, t.y)];
       if (m === 1) {
-        const r = await fetchOne(joinUrl(base, mirrorTilePath(t.layer, t.z, t.x, t.y)), fetchImpl, decode, timeout, signal);
+        const r = await fetchOne(joinUrl(base, mirrorTilePath(t.layer, t.z, t.x, t.y)), fetchImpl, decode, timeout, outer, cancel.signal);
         if (r.slot instanceof Float32Array) {
           fromMirror++;
           return r.slot;
         }
         // ミラーの破損・欠落 → 国土地理院へ
       }
-      if (remoteDisabled) return 'error';
-      const r = await fetchOne(gsiTileUrl(t.layer, t.z, t.x, t.y), fetchImpl, decode, timeout, signal);
-      if (r.network) {
-        remoteNetErrors++;
-        // 1枚も取得できないまま失敗が続く → 接続できないと判断
-        if (remoteOk === 0 && remoteNetErrors >= Math.max(3, concurrency)) remoteDisabled = true;
+      if (remoteDisabled || cancel.signal.aborted) return 'error';
+      const r = await fetchOne(gsiTileUrl(t.layer, t.z, t.x, t.y), fetchImpl, decode, timeout, outer, cancel.signal);
+      if (r.slot === 'error') {
+        remoteErrors++;
+        // 1枚も取得できないまま失敗が続く → 使えないと判断（HTTP 403 などを返し続ける場合も含む）
+        if (remoteOk === 0 && remoteErrors >= Math.max(3, concurrency)) remoteDisabled = true;
       } else {
         remoteOk++;
         if (r.slot instanceof Float32Array) fromRemote++;
@@ -365,7 +442,7 @@ export async function fetchDemMosaic(opts: DemFetchOptions = {}): Promise<DemFet
           done++;
           report(p0 + ((p1 - p0) * done) / tasks.length, `標高タイル（${label}）を取得中… ${done}/${tasks.length}`);
         },
-        signal,
+        outer,
       );
     };
 
@@ -388,7 +465,10 @@ export async function fetchDemMosaic(opts: DemFetchOptions = {}): Promise<DemFet
     const probe = await getTile(probeTask, Math.min(timeoutMs, 6000));
     slots.set(tileKey(probeTask.layer, probeTask.z, probeTask.x, probeTask.y), probe);
     if (probe === 'error' && fromMirror === 0 && remoteOk === 0) {
-      throw new TerrainFetchError('国土地理院の標高タイルに接続できませんでした（ネットワークの制限またはオフラインの可能性があります）。');
+      throw new TerrainFetchError(
+        '国土地理院の標高タイルに接続できませんでした（ネットワークの制限またはオフラインの可能性があります）。',
+        true,
+      );
     }
 
     // (3) DEM5A → 無効値を含むタイルだけ DEM5B → DEM5C
@@ -412,7 +492,10 @@ export async function fetchDemMosaic(opts: DemFetchOptions = {}): Promise<DemFet
       }
       await runPhase(tasks, p0, p1, demLayer(layer).label);
       if (remoteDisabled && useRemote && fromMirror === 0 && fromRemote === 0) {
-        throw new TerrainFetchError('国土地理院の標高タイルを取得できませんでした（ネットワークの制限またはオフラインの可能性があります）。');
+        throw new TerrainFetchError(
+          '国土地理院の標高タイルを取得できませんでした（ネットワークの制限またはオフラインの可能性があります）。',
+          true,
+        );
       }
     }
 
@@ -434,19 +517,20 @@ export async function fetchDemMosaic(opts: DemFetchOptions = {}): Promise<DemFet
       const [layer, z, x, y] = key.split('/');
       retry.push({ layer: layer as DemLayerId, z: Number(z), x: Number(x), y: Number(y) });
     }
-    if (retry.length > 0 && !remoteDisabled) await runPhase(retry, 0.93, 0.96, '再試行');
+    if (retry.length > 0 && !remoteDisabled && !cancel.signal.aborted) await runPhase(retry, 0.93, 0.96, '再試行');
+    if (outer.aborted) throw abortError();
 
-    report(0.97, '標高タイルをつなぎ合わせています…');
-    const mosaic = buildMosaic(dom, z15, lookup);
     let failed = 0;
     let missing = 0;
     for (const s of slots.values()) {
       if (s === 'error') failed++;
       else if (s === 'missing') missing++;
     }
-    return { mosaic, fromMirror, fromRemote, missing, failed };
+    report(0.97, '標高タイルをつなぎ合わせています…');
+    const mosaic = buildMosaic(dom, z15, lookup);
+    return { mosaic, fromMirror, fromRemote, missing, failed, timedOut: deadlineHit && failed > 0 };
   } finally {
-    outer.removeEventListener('abort', onOuterAbort);
+    clearTimeout(deadlineTimer);
   }
 }
 

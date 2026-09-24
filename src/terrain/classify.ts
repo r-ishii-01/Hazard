@@ -2,9 +2,13 @@
  * 水域セルの分類（純粋関数）。
  *
  * - 水域（標高が NaN のセル）の4近傍連結成分を求める。
- * - 南・東・西の格子端に接する成分は海（CELL_SEA）。海につながった河川（引地川・境川など）も同じ成分になるので海扱い。
+ * - 格子の南端（沖。範囲の南端は全体が海）に接する成分は海（CELL_SEA）。海につながった河川（引地川・境川など）も
+ *   同じ成分になるので海扱い。東・西・北端に接するだけの水域（範囲の外でつながっているかもしれない川や池）は
+ *   海とはみなさない（範囲内で海とつながっていれば、南端からたどれるので海になる）。
  * - それ以外（池・調整池、上流で途切れた河川片など）は内水面（CELL_INLAND_WATER）。
  *   計算上は陸なので、標高は成分の周囲の陸セルの最低標高（あふれ出す高さ）とする。
+ * - isolated が与えられた場合、isolated[k] が真の水域セル（海とつながった水面の画素を含まない＝池の水面だけのセル）は
+ *   海の成分に含めない。セルの大きさより狭い堤で川と隔てられた池が、セルに平均しただけで川とつながるのを防ぐ。
  * - 陸は標高データのとおり（江の島のように海に囲まれた陸もそのまま陸）。
  */
 import { CELL_INLAND_WATER, CELL_LAND, CELL_SEA } from '../core/types';
@@ -20,12 +24,16 @@ export interface ClassifyResult {
 }
 
 export interface ClassifyOptions {
-  /** 海とみなす格子端（既定: 南・東・西） */
+  /** 海とみなす格子端（既定: 南のみ） */
   seaEdges?: { north?: boolean; south?: boolean; east?: boolean; west?: boolean };
+  /** isolated[k] が真の水域セルは海の成分に含めない（池の水面だけを含むセル）。長さ nx*ny */
+  isolated?: ArrayLike<number | boolean> | null;
 }
 
 export function classifyWater(elev: Float32Array, nx: number, ny: number, opts: ClassifyOptions = {}): ClassifyResult {
-  const edges = { north: false, south: true, east: true, west: true, ...opts.seaEdges };
+  const edges = { north: false, south: true, east: false, west: false, ...opts.seaEdges };
+  const isolated = opts.isolated ?? null;
+  const iso = (k: number) => (isolated && isolated[k] ? 1 : 0);
   const n = nx * ny;
   const kind = new Uint8Array(n);
   const z = new Float32Array(n);
@@ -51,13 +59,14 @@ export function classifyWater(elev: Float32Array, nx: number, ny: number, opts: 
     let tail = 0;
     queue[tail++] = start;
     comp[start] = compId;
+    const group = iso(start);
     let touchesSea = false;
     let spill = Number.POSITIVE_INFINITY;
     while (head < tail) {
       const k = queue[head++];
       const i = k % nx;
       const j = (k - i) / nx;
-      if ((edges.west && i === 0) || (edges.east && i === nx - 1) || (edges.south && j === ny - 1) || (edges.north && j === 0)) {
+      if (!group && ((edges.west && i === 0) || (edges.east && i === nx - 1) || (edges.south && j === ny - 1) || (edges.north && j === 0))) {
         touchesSea = true;
       }
       // 4近傍
@@ -79,7 +88,7 @@ export function classifyWater(elev: Float32Array, nx: number, ny: number, opts: 
         const ev = elev[kk];
         if (ev === ev) {
           if (ev < spill) spill = ev;
-        } else if (comp[kk] === -1) {
+        } else if (comp[kk] === -1 && iso(kk) === group) {
           comp[kk] = compId;
           queue[tail++] = kk;
         }
@@ -105,113 +114,4 @@ export function classifyWater(elev: Float32Array, nx: number, ny: number, opts: 
     compId++;
   }
   return { kind, z, seaCells, inlandCells, inlandComponents };
-}
-
-export interface GapOptions {
-  /** 橋渡しに使えるセルの水面画素の割合の下限（既定 0.2） */
-  minFrac?: number;
-  /** 一度に橋渡しする最大セル数（既定 2） */
-  maxGap?: number;
-  /** 繰り返しの上限（既定 50） */
-  maxIterations?: number;
-}
-
-/**
- * 細い河川が粗い格子で途切れるのを補う（elev をその場で書き換え、水域にしたセル数を返す）。
- *
- * 川幅がセルと同程度だと、「無効値が半分以上なら水域」の規則では川が所々で陸になり、上流側が海から切り離される。
- * そこで、海につながった水域から、水面画素を minFrac 以上含むセルだけを通って maxGap セル以内で
- * 内水面（切り離された川の続きなど）に届く場合、その経路のセルを水域にする。これを変化がなくなるまで繰り返す。
- * 海岸線（海と陸の境）そのものは動かさない（内水面に届く経路だけを水域にする）。
- */
-export function bridgeWaterGaps(elev: Float32Array, waterFrac: Float32Array, nx: number, ny: number, opts: GapOptions = {}): number {
-  const minFrac = opts.minFrac ?? 0.2;
-  const maxGap = opts.maxGap ?? 2;
-  const maxIter = opts.maxIterations ?? 50;
-  const n = nx * ny;
-  const comp = new Int32Array(n);
-  const dist = new Int32Array(n);
-  const parent = new Int32Array(n);
-  const queue = new Int32Array(n);
-  let converted = 0;
-
-  const neighbours = (k: number, out: number[]) => {
-    out.length = 0;
-    const i = k % nx;
-    const j = (k - i) / nx;
-    if (i > 0) out.push(k - 1);
-    if (i < nx - 1) out.push(k + 1);
-    if (j > 0) out.push(k - nx);
-    if (j < ny - 1) out.push(k + nx);
-  };
-  const nb: number[] = [];
-
-  for (let iter = 0; iter < maxIter; iter++) {
-    // 水域の連結成分: 1 = 海につながる、2 以上 = 内水面（成分番号）、0 = 陸
-    comp.fill(0);
-    let next = 2;
-    for (let s = 0; s < n; s++) {
-      if (comp[s] !== 0 || elev[s] === elev[s]) continue;
-      let head = 0;
-      let tail = 0;
-      queue[tail++] = s;
-      comp[s] = -1;
-      let sea = false;
-      while (head < tail) {
-        const k = queue[head++];
-        const i = k % nx;
-        const j = (k - i) / nx;
-        if (i === 0 || i === nx - 1 || j === ny - 1) sea = true;
-        neighbours(k, nb);
-        for (const kk of nb) {
-          if (comp[kk] === 0 && elev[kk] !== elev[kk]) {
-            comp[kk] = -1;
-            queue[tail++] = kk;
-          }
-        }
-      }
-      const id = sea ? 1 : next++;
-      for (let q = 0; q < tail; q++) comp[queue[q]] = id;
-    }
-    if (next === 2) break; // 内水面が無い
-
-    // 海から、橋渡し候補セル（陸だが水面を minFrac 以上含む）だけを通る幅優先探索
-    dist.fill(-1);
-    let head = 0;
-    let tail = 0;
-    for (let k = 0; k < n; k++) {
-      if (comp[k] === 1) {
-        dist[k] = 0;
-        parent[k] = -1;
-        queue[tail++] = k;
-      }
-    }
-    const best = new Map<number, number>(); // 内水面の成分 → 到達した候補セル
-    while (head < tail) {
-      const k = queue[head++];
-      const d = dist[k];
-      neighbours(k, nb);
-      for (const kk of nb) {
-        const c = comp[kk];
-        if (c >= 2) {
-          if (d > 0 && !best.has(c)) best.set(c, k);
-          continue;
-        }
-        if (d >= maxGap || dist[kk] !== -1 || c !== 0 || waterFrac[kk] < minFrac) continue;
-        dist[kk] = d + 1;
-        parent[kk] = k;
-        queue[tail++] = kk;
-      }
-    }
-    if (best.size === 0) break;
-    for (const cell of best.values()) {
-      for (let k = cell; k !== -1 && comp[k] !== 1; k = parent[k]) {
-        if (elev[k] === elev[k]) {
-          elev[k] = Number.NaN;
-          converted++;
-        }
-      }
-    }
-  }
-  return converted;
 }

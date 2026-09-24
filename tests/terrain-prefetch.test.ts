@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DOMAIN_BOUNDS } from '../src/core/geo';
+import { createGridSpec, DOMAIN_BOUNDS } from '../src/core/geo';
 import { gsiTileUrl } from '../src/terrain/gsiDem';
 import { listRequiredDemTiles } from '../src/terrain/tiles';
 
@@ -30,6 +30,19 @@ describe('scripts/prefetch-dem.mjs', () => {
     const mod = await load();
     const urls = mod.listTiles().map((t) => mod.tileUrl(t));
     expect(urls).toEqual(listRequiredDemTiles().map((t) => gsiTileUrl(t.layer, t.z, t.x, t.y)));
+  });
+
+  it('computes the same tile set as the loader for other bounds too (duplicated Web-Mercator math)', async () => {
+    const mod = await load();
+    for (const b of [
+      { west: 139.3, east: 139.61, south: 35.2, north: 35.41 },
+      { west: 139.4401, east: 139.4999, south: 35.2901, north: 35.3449 },
+      { west: 140.0, east: 140.01, south: 35.0, north: 35.01 },
+    ]) {
+      const spec = createGridSpec('fine', b as unknown as typeof DOMAIN_BOUNDS);
+      const want = listRequiredDemTiles(spec).map((t) => gsiTileUrl(t.layer, t.z, t.x, t.y));
+      expect(mod.listTiles(b as typeof DOMAIN_BOUNDS).map((t) => mod.tileUrl(t))).toEqual(want);
+    }
   });
 
   it('--dry-run prints the URL list without downloading', async () => {

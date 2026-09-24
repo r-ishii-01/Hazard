@@ -54,8 +54,10 @@ public/tiles/
 [国土地理院コンテンツ利用規約](https://www.gsi.go.jp/kikakuchousei/kikakuchousei40182.html) に従い出典を明示してください。
 このサイトでは、地形の情報パネルに次のように表示しています（加工して利用していることも明記）。
 
-> 国土地理院 標高タイル（DEM5A など）を加工して作成
+> 地理院タイル（標高タイル（基盤地図情報数値標高モデル））を加工して作成（国土地理院 DEM5A）
 > 出典: 国土地理院「地理院タイル（標高タイル）」 https://maps.gsi.go.jp/development/ichiran.html#dem
+
+（「地理院タイル（標高タイル（基盤地図情報数値標高モデル））を加工して作成」は、同規約の「コンテンツを編集・加工等して利用する場合」の記載例の文言です。）
 
 標高タイルの仕様: [標高タイルの詳細仕様](https://maps.gsi.go.jp/development/demtile.html)（国土地理院）
 

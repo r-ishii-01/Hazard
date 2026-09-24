@@ -11,14 +11,15 @@ import { classifyWater } from './classify';
 
 /**
  * マニングの粗度係数 n [s/m^(1/3)]。
- * 出典: 国土交通省「津波浸水想定の設定の手引き Ver.2.11」（2023）の土地利用別の粗度係数（小谷ほか 1998 に基づく）
+ * 出典: 国土交通省 水管理・国土保全局 海岸室・国土技術政策総合研究所「津波浸水想定の設定の手引き Ver.2.11」（2023年4月）
  *   https://www.mlit.go.jp/sogoseisaku/point/content/001621078.pdf
- *   高密度居住区 0.080 / 中密度居住区 0.060 / 低密度居住区 0.040 / 農地 0.020 / 林地 0.030 / 水域 0.025
- * 土地利用のデータは持たないため、陸域は一律に中密度居住区の 0.060 とする
+ *   の土地利用別の粗度係数（小谷ほか (1998)「GIS を利用した津波遡上計算と被害推定法」海岸工学論文集 45 に基づく）:
+ *   高密度居住区 0.080 / 中密度居住区 0.060 / 低密度居住区 0.040 / 森林域 0.030 / 田畑域 0.020 / 海域・河川域 0.025
+ * 土地利用のデータは持たないため、陸域は一律に中密度居住区の 0.060 とする【仮定】
  * （シミュレーション側は陸域を SimParams.landManning で上書きする）。
  */
 export const MANNING = {
-  /** 海・河川・池などの水域 */
+  /** 海域・河川域 */
   water: 0.025,
   /** 陸域の既定値（中密度居住区） */
   land: 0.06,
@@ -38,16 +39,24 @@ export interface BuildStats {
   maxDepth: number;
 }
 
+export interface BuildOptions {
+  /** 海底地形の推定に使う断面（既定 SHONAN_PROFILE） */
+  profile?: OffshoreProfile;
+  /** classifyWater に渡す「池の水面だけのセル」のマスク */
+  isolated?: ArrayLike<number | boolean> | null;
+}
+
 /** elev: セル標高 [m, T.P.]（NaN = 水域）。長さ spec.nx * spec.ny */
 export function buildTerrainGrid(
   spec: GridSpec,
   elev: Float32Array,
   meta: BuildMeta,
-  profile: OffshoreProfile = SHONAN_PROFILE,
+  opts: BuildOptions = {},
 ): { grid: TerrainGrid; stats: BuildStats } {
   const { nx, ny } = spec;
+  const profile = opts.profile ?? SHONAN_PROFILE;
   if (elev.length !== nx * ny) throw new Error(`elev length ${elev.length} != ${nx}x${ny}`);
-  const cls = classifyWater(elev, nx, ny);
+  const cls = classifyWater(elev, nx, ny, { isolated: opts.isolated });
   const bathy = applyBathymetry(cls.z, cls.kind, nx, ny, spec.dx, profile);
   const n = nx * ny;
   const manning = new Float32Array(n);

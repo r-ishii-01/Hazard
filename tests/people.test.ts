@@ -337,6 +337,18 @@ describe('planEvacuation', () => {
     expect(20 - 0.5 * end2.j).toBeGreaterThanOrEqual(13);
   });
 
+  it('highground without sim output does not add the tide twice (coastHeight is already T.P.)', () => {
+    const spec = smallSpec(30, 40);
+    const grid = makeGrid(spec, (_i, j) => ({ z: 20 - 0.5 * j }));
+    const person = personAt(spec, 15, 35, { evacMode: 'highground' });
+    const plan = planEvacuation(person, grid, [], null, { ...paramsWith(5), tideTP: 0.85 });
+    const end = cellOfPoint(spec, plan.target!.lon, plan.target!.lat);
+    const zEnd = 20 - 0.5 * end.j;
+    // 目標は T.P.5m + 1m = 6m 以上の最寄り。潮位を二重に足すと 6.85m 以上（7m）になる
+    expect(zEnd).toBeGreaterThanOrEqual(6);
+    expect(zEnd).toBeLessThan(6.85);
+  });
+
   it('highground with a complete sim output: never-inundated cells with a buffer', () => {
     const spec = smallSpec(30, 40);
     const n = 30 * 40;
