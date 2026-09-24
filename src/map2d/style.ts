@@ -7,6 +7,7 @@
 import type { MapOptions } from 'maplibre-gl';
 import type { Basemap, LayerState } from '../core/types';
 import { BASEMAPS, HAZARD_TSUNAMI_TILES, RELIEF_TILES, type RasterTileSource } from '../data/sources';
+import { HAZARD_PROTOCOL_URL } from './hazardTiles';
 
 export type StyleSpec = Exclude<MapOptions['style'], string | undefined>;
 export type LayerSpec = StyleSpec['layers'][number];
@@ -91,7 +92,8 @@ export function buildStyle(basemap: Basemap, layers: LayerState, corners: Coords
     sources: {
       [basemapLayerId(basemap)]: rasterSource(BASEMAPS[basemap]),
       [IDS.relief]: rasterSource(RELIEF_TILES),
-      [IDS.hazard]: rasterSource(HAZARD_TSUNAMI_TILES),
+      // 海だけのタイルを要求しないよう、独自スキーム経由で読む（hazardTiles.ts）
+      [IDS.hazard]: { ...rasterSource(HAZARD_TSUNAMI_TILES), tiles: [HAZARD_PROTOCOL_URL] } as SourceSpec,
       [IDS.arrival]: { type: 'image', coordinates: corners },
       [IDS.maxDepth]: { type: 'image', coordinates: corners },
       [IDS.flood]: { type: 'image', coordinates: corners },

@@ -262,6 +262,16 @@ export interface CursorInfo {
   waterDepth?: number;
 }
 
+/** 避難場所データをどこから得たか */
+export interface SheltersInfo {
+  /** 'gsi' = 国土地理院のサーバーから取得、'builtin' = 内蔵の写し */
+  origin: 'gsi' | 'builtin';
+  /** 画面表示用の説明（日本語） */
+  message: string;
+  /** 件数 */
+  count: number;
+}
+
 export interface AppState {
   view: ViewMode;
   basemap: Basemap;
@@ -273,7 +283,11 @@ export interface AppState {
   scenarioId: string;
   /** 実行パラメータ（UI で編集） */
   params: SimParams;
-  sim: { status: SimStatus; progress: number; output: SimOutput | null; message?: string; runId: number };
+  /**
+   * 計算の状態。auto は、初めて開いたときに自動で始めた計算なら true（UI の説明表示用）。
+   * output は SimOutput に加え、sim モジュールの実装では notes（注記）・revision（更新番号）なども持つ。
+   */
+  sim: { status: SimStatus; progress: number; output: SimOutput | null; message?: string; runId: number; auto?: boolean };
   /** 時刻（地震発生からの秒）と再生状態。speed は実時間1秒あたりのシミュレーション秒 */
   time: { t: number; playing: boolean; speed: number };
   people: Person[];
@@ -282,6 +296,8 @@ export interface AppState {
   /** 地図クリックで人物を置くモード */
   placing: PersonKind | null;
   shelters: Shelter[];
+  /** 避難場所データの出所（読み込み後に設定。未読み込み・読み込み中は undefined） */
+  sheltersInfo?: SheltersInfo;
   cursor: CursorInfo | null;
   /** 3D の鉛直強調倍率 */
   exaggeration: number;

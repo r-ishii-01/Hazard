@@ -18,7 +18,7 @@ import type {
 } from './types';
 import { loadTerrain } from '../terrain';
 import { SimRunner } from '../sim';
-import { loadShelters } from '../data/shelters';
+import { loadSheltersDetailed } from '../data/shelters';
 import { SCENARIOS, SHINDO_PRESETS, defaultParams, getScenario } from '../data/scenarios';
 import { PERSON_PROFILES, planEvacuation } from '../people';
 
@@ -51,6 +51,11 @@ export interface AppActions {
   setCursor(c: CursorInfo | null): void;
   setExaggeration(x: number): void;
   reloadTerrain(resolution?: Resolution): void;
+  /**
+   * 初回の自動実行を許可する（「ご利用にあたって」を閉じた後に UI から呼ぶ）。
+   * 地形の準備ができていて、利用者がまだ条件の変更や実行をしていなければ、既定のシナリオを1回だけ自動で計算・再生する。
+   */
+  armAutoRun(): void;
 }
 
 export const SPEED_OPTIONS = [10, 30, 60, 120, 240] as const;
@@ -94,6 +99,16 @@ export function createController(store: Store<AppState>): AppActions {
   let rafId = 0;
   /** 地形の読み込みが終わったら実行するシミュレーション */
   let pendingRun = false;
+  /** 初回の自動実行: 許可されたか・もう済んだ（または不要になった）か */
+  let autoArmed = false;
+  let autoSpent = false;
+  /** 利用者が条件を変えた・実行したら、以後は自動実行しない */
+  const userActed = () => {
+    autoSpent = true;
+  };
+  /** 計算の進み具合 [計算上の秒 / 実時間の秒]（再生を計算に合わせるための推定値） */
+  let computeRate = 0;
+  let lastReady = { t: 0, at: 0 };
 
   const durationSec = () => store.get().params.durationMin * 60;
 
@@ -102,13 +117,31 @@ export function createController(store: Store<AppState>): AppActions {
     rafId = 0;
     const s = store.get();
     if (!s.time.playing) return;
-    const dtReal = Math.min(0.1, (now - lastFrame) / 1000);
+    // 描画の遅い端末（毎秒数フレーム）でも設定した速さで進むよう、1フレームの上限は 0.25 秒（タブ復帰時の飛びは防ぐ）
+    const dtReal = Math.min(0.25, Math.max(0, (now - lastFrame) / 1000));
     lastFrame = now;
     const out = s.sim.output;
     const end = out ? out.durationSec : durationSec();
     // 計算が追いついていない時刻へは進めない（バッファリング）
-    const limit = out ? Math.min(end, out.timeReady()) : end;
-    let t = s.time.t + dtReal * s.time.speed;
+    const ready = out ? out.timeReady() : end;
+    const limit = out ? Math.min(end, ready) : end;
+    let speed = s.time.speed;
+    if (out && s.sim.status === 'running' && ready < end) {
+      // 計算中は、計算済みの時刻の少し手前を計算の進む速さに合わせて進める。
+      // 届いたフレームの間を補間して表示できるので、フレームごとにカクカク止まらず滑らかに動く。
+      if (ready !== lastReady.t) {
+        if (lastReady.at > 0 && ready > lastReady.t) {
+          const r = (ready - lastReady.t) / Math.max(0.05, (now - lastReady.at) / 1000);
+          computeRate = computeRate > 0 ? computeRate * 0.7 + r * 0.3 : r;
+        }
+        lastReady = { t: ready, at: now };
+      }
+      const lag = out.frameInterval * 1.5;
+      const gap = ready - lag - s.time.t;
+      // 追いつきそうなら計算の速さまで落とし、遅れていれば少し速める（比例制御）
+      speed = Math.max(0, Math.min(s.time.speed, computeRate + gap * 0.5));
+    }
+    let t = s.time.t + dtReal * speed;
     let playing = true;
     if (t >= end) {
       t = end;
@@ -171,6 +204,8 @@ export function createController(store: Store<AppState>): AppActions {
         if (pendingRun) {
           pendingRun = false;
           actions.runSimulation();
+        } else {
+          maybeAutoRun();
         }
       })
       .catch((e: unknown) => {
@@ -180,12 +215,63 @@ export function createController(store: Store<AppState>): AppActions {
       });
   };
 
+  /** 計算の開始（auto: 初回の自動実行か）。地形が準備できていること */
+  function startRun(auto: boolean): void {
+    const s = store.get();
+    const grid = s.terrain.grid;
+    if (!grid) return;
+    const runId = s.sim.runId + 1;
+    computeRate = 0;
+    lastReady = { t: 0, at: 0 };
+    store.set({
+      sim: { status: 'running', progress: 0, output: null, runId, message: '計算を開始しています…', auto },
+      time: { ...s.time, t: 0, playing: false },
+    });
+    runner.run(grid, s.params, {
+      onProgress: (progress, message) => {
+        const cur = store.get().sim;
+        if (cur.runId !== runId) return;
+        store.set({ sim: { ...cur, progress, message } });
+      },
+      onOutput: (output) => {
+        const cur = store.get().sim;
+        if (cur.runId !== runId) return;
+        store.set({ sim: { ...cur, output } });
+        actions.play();
+      },
+      onDone: () => {
+        const cur = store.get().sim;
+        if (cur.runId !== runId) return;
+        store.set({ sim: { ...cur, status: 'done', progress: 1, message: '計算完了' } });
+      },
+      onError: (message) => {
+        const cur = store.get().sim;
+        if (cur.runId !== runId) return;
+        store.set({ sim: { ...cur, status: 'error', message } });
+      },
+    });
+  }
+
+  /** 初回の自動実行（条件がそろった時に1回だけ） */
+  const maybeAutoRun = () => {
+    if (!autoArmed || autoSpent) return;
+    const s = store.get();
+    if (s.terrain.status !== 'ready' || !s.terrain.grid) return;
+    if (s.sim.runId !== 0 || s.sim.status !== 'idle') {
+      autoSpent = true;
+      return;
+    }
+    autoSpent = true;
+    startRun(true);
+  };
+
   const actions: AppActions = {
     setView: (view) => store.set({ view }),
     setBasemap: (basemap) => store.set({ basemap }),
     setLayer: (key, value) => store.set({ layers: { ...store.get().layers, [key]: value } }),
 
     selectShindo: (shindo) => {
+      userActed();
       const preset = SHINDO_PRESETS[shindo];
       const scenario = getScenario(preset.scenarioId);
       if (!scenario) {
@@ -201,6 +287,7 @@ export function createController(store: Store<AppState>): AppActions {
     },
 
     selectScenario: (id) => {
+      userActed();
       const scenario = getScenario(id);
       if (!scenario) return;
       const prev = store.get().params;
@@ -212,6 +299,7 @@ export function createController(store: Store<AppState>): AppActions {
     },
 
     updateParams: (patch) => {
+      userActed();
       const prev = store.get().params;
       const next = { ...prev, ...patch };
       store.set({ params: next });
@@ -219,11 +307,13 @@ export function createController(store: Store<AppState>): AppActions {
     },
 
     updateScenario: (patch) => {
+      userActed();
       const prev = store.get().params;
       store.set({ params: { ...prev, scenario: { ...prev.scenario, ...patch } } });
     },
 
     runSimulation: () => {
+      userActed();
       const s = store.get();
       const grid = s.terrain.grid;
       if (!grid || s.terrain.status !== 'ready') {
@@ -231,37 +321,12 @@ export function createController(store: Store<AppState>): AppActions {
         if (s.terrain.status !== 'loading') reloadTerrain();
         return;
       }
-      const runId = s.sim.runId + 1;
-      store.set({
-        sim: { status: 'running', progress: 0, output: null, runId, message: '計算を開始しています…' },
-        time: { ...s.time, t: 0, playing: false },
-      });
-      runner.run(grid, s.params, {
-        onProgress: (progress, message) => {
-          const cur = store.get().sim;
-          if (cur.runId !== runId) return;
-          store.set({ sim: { ...cur, progress, message } });
-        },
-        onOutput: (output) => {
-          const cur = store.get().sim;
-          if (cur.runId !== runId) return;
-          store.set({ sim: { ...cur, output } });
-          actions.play();
-        },
-        onDone: () => {
-          const cur = store.get().sim;
-          if (cur.runId !== runId) return;
-          store.set({ sim: { ...cur, status: 'done', progress: 1, message: '計算完了' } });
-        },
-        onError: (message) => {
-          const cur = store.get().sim;
-          if (cur.runId !== runId) return;
-          store.set({ sim: { ...cur, status: 'error', message } });
-        },
-      });
+      startRun(false);
     },
 
     cancelSimulation: () => {
+      userActed();
+      pendingRun = false;
       runner.cancel();
       const cur = store.get().sim;
       if (cur.status === 'running') store.set({ sim: { ...cur, status: 'idle', message: '計算を中止しました' } });
@@ -319,12 +384,17 @@ export function createController(store: Store<AppState>): AppActions {
     setCursor: (cursor) => store.set({ cursor }),
     setExaggeration: (exaggeration) => store.set({ exaggeration }),
     reloadTerrain,
+    armAutoRun: () => {
+      if (autoArmed) return;
+      autoArmed = true;
+      maybeAutoRun();
+    },
   };
 
   // 起動時の読み込み
   reloadTerrain();
-  loadShelters()
-    .then((shelters) => store.set({ shelters }))
+  loadSheltersDetailed()
+    .then(({ shelters, origin, message }) => store.set({ shelters, sheltersInfo: { origin, message, count: shelters.length } }))
     .catch((e) => console.warn('[shelters] load failed', e));
 
   return actions;

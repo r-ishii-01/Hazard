@@ -1,13 +1,14 @@
 /**
  * 「地震・津波」タブ: 地形の状態、震度・シナリオの選択、条件の調整、実行と結果の要約。
  */
-import { SHINDO_LABEL, SHINDO_LEVELS, type AppState, type QuakeScenario, type ShindoLevel } from '../../core/types';
+import { SHINDO_LABEL, SHINDO_LEVELS, type AppState, type ShindoLevel, type TerrainGrid } from '../../core/types';
 import { createGridSpec, type Resolution } from '../../core/geo';
-import { SCENARIOS, SHINDO_PRESETS, defaultParams, getScenario } from '../../data/scenarios';
+import { SCENARIOS, SCENARIO_NOTES, SHINDO_PRESETS, defaultParams, getScenario, type ScenarioInfo } from '../../data/scenarios';
 import { INTENSITY_INFO } from '../../data/intensity';
 import { WARNING_INFO } from '../../data/warnings';
+import { DEM_CREDIT, DEM_CREDIT_HTML } from '../../data/sources';
 import type { UIContext } from '../context';
-import { extLink, h, setHidden, setText } from '../dom';
+import { extLink, h, linkifyText, safeAttributionHTML, setHidden, setText } from '../dom';
 import { radioField, selectField, sliderField } from '../fields';
 import { formatDepth, formatElapsed, formatMinutes, formatPercent, formatTP, formatArea, isSafeColor, readableTextColor } from '../format';
 import { icon } from '../icons';
@@ -73,7 +74,12 @@ function terrainStatus(ctx: UIContext): HTMLElement {
       const spec = g.spec;
       const gridInfo = spec ? `${spec.nx}×${spec.ny}セル（1セル 約${Math.round(spec.dx)} m）` : '';
       const notesEl = notes.length
-        ? h('details', { class: 'notes' }, h('summary', null, '地形データについての注記'), h('ul', null, notes.map((n) => h('li', null, n))))
+        ? h(
+            'details',
+            { class: 'notes terrain-notes' },
+            h('summary', null, `地形データについての注記（${notes.length}件）`),
+            h('ul', null, notes.map((n) => h('li', null, linkifyText(n)))),
+          )
         : null;
       if (g.isApproximate) {
         box.append(
@@ -82,7 +88,7 @@ function terrainStatus(ctx: UIContext): HTMLElement {
             { class: 'callout callout-warning', role: 'status' },
             h('div', { class: 'callout-title' }, icon('alert', 18), '簡易地形モデルで表示中'),
             h('p', null, '国土地理院の標高データを取得できなかったため、簡易地形モデルで表示しています。実際の地形とは異なります。'),
-            g.sourceLabel ? h('p', { class: 'small' }, g.sourceLabel) : null,
+            g.sourceLabel ? h('p', { class: 'small terrain-label' }, g.sourceLabel) : null,
             notesEl,
             h('div', { class: 'callout-actions' }, h('button', { type: 'button', class: 'btn btn-secondary btn-sm', onclick: () => ctx.actions.reloadTerrain() }, icon('retry', 16), '標高データを再取得')),
           ),
@@ -92,8 +98,8 @@ function terrainStatus(ctx: UIContext): HTMLElement {
           h(
             'div',
             { class: 'terrain-ok' },
-            h('div', { class: 'status-line' }, icon('map', 16), h('span', null, g.sourceLabel || '地形データ読み込み済み')),
-            gridInfo ? h('div', { class: 'small muted' }, gridInfo) : null,
+            h('div', { class: 'terrain-credit' }, icon('map', 16), h('span', { class: 'terrain-label' }, h('span', { class: 'terrain-credit-head' }, '地形: '), terrainCredit(g))),
+            h('div', { class: 'small muted terrain-meta' }, [gridInfo, originLabel(g)].filter(Boolean).join('・')),
             notesEl,
           ),
         );
@@ -103,6 +109,27 @@ function terrainStatus(ctx: UIContext): HTMLElement {
   };
   ctx.scope.add(ctx.store.select((s) => s.terrain, render, true));
   return box;
+}
+
+/** 地形の出典表記。国土地理院の標高タイルを加工したものはリンク付きの定型文（DEM_CREDIT_HTML）で示す */
+function terrainCredit(g: TerrainGrid): DocumentFragment {
+  const frag = document.createDocumentFragment();
+  const label = (g.sourceLabel ?? '').trim();
+  if (g.source === 'synthetic') {
+    frag.append(label || '簡易地形モデル');
+    return frag;
+  }
+  frag.append(safeAttributionHTML(DEM_CREDIT_HTML));
+  // sourceLabel が定型文で始まる場合は残り（例:「（国土地理院 DEM5A）」）だけを続ける
+  const rest = label.startsWith(DEM_CREDIT) ? label.slice(DEM_CREDIT.length).trim() : label;
+  if (rest) frag.append(rest.startsWith('（') ? rest : `（${rest}）`);
+  return frag;
+}
+
+function originLabel(g: TerrainGrid): string {
+  if (g.source === 'cache') return 'このサイトに保存した標高タイルの複製から読み込み';
+  if (g.source === 'gsi') return '国土地理院のサーバーから取得';
+  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -207,17 +234,29 @@ function shindoSection(ctx: UIContext): HTMLElement {
 // シナリオ
 // ---------------------------------------------------------------------------
 
-function scenarioCard(ctx: UIContext, sc: QuakeScenario): HTMLElement {
+/** 「最大波の到達（想定） 約8分」のような表記。説明用の例は「設定」とする */
+export function arrivalFactLabel(sc: Pick<ScenarioInfo, 'arrivalMin' | 'isOfficial'>): string {
+  return `最大波の到達（${sc.isOfficial ? '想定' : '設定'}） 約${formatMinutes(sc.arrivalMin)}`;
+}
+
+function scenarioCard(ctx: UIContext, sc: ScenarioInfo): HTMLElement {
   const warn = WARNING_INFO[sc.warning];
   const facts = [
     sc.magnitude !== null && Number.isFinite(sc.magnitude) ? `M${sc.magnitude.toFixed(1)}` : null,
-    `最大津波高 ${sc.coastHeight.toFixed(1)} m`,
-    `到達 約${formatMinutes(sc.arrivalMin)}`,
+    `最大津波高 ${formatTP(sc.coastHeight)}`,
+    arrivalFactLabel(sc),
   ].filter(Boolean) as string[];
   const shBg = intensityColor(sc.shindo);
+  const basis = (sc.arrivalBasis ?? '').trim();
   const btn = h(
     'button',
-    { type: 'button', class: 'scenario-main', 'aria-pressed': 'false', onclick: () => ctx.actions.selectScenario(sc.id) },
+    {
+      type: 'button',
+      class: 'scenario-main',
+      'aria-pressed': 'false',
+      title: basis ? `到達時間の根拠: ${basis}` : undefined,
+      onclick: () => ctx.actions.selectScenario(sc.id),
+    },
     h(
       'span',
       { class: 'scenario-top' },
@@ -232,12 +271,26 @@ function scenarioCard(ctx: UIContext, sc: QuakeScenario): HTMLElement {
       warn ? h('span', { class: 'mini-warn', style: { background: isSafeColor(warn.color) ? warn.color : '#e5e7eb', color: isSafeColor(warn.textColor) ? warn.textColor : '#111827' } }, warn.label) : null,
     ),
   );
+  // 以下は選択中のカードだけに表示する（CSS の .scenario-more）
   const desc = sc.description ? h('p', { class: 'scenario-desc' }, sc.description) : null;
+  const basisEl = basis ? h('p', { class: 'scenario-basis' }, h('strong', null, '到達時間の根拠: '), basis) : null;
+  const assumptions = (sc.assumptions ?? []).filter((a) => typeof a === 'string' && a.trim());
+  const assumeEl = assumptions.length
+    ? h('details', { class: 'notes scenario-assume' }, h('summary', null, `前提・仮定（${assumptions.length}件）`), h('ul', null, assumptions.map((a) => h('li', null, a))))
+    : null;
+  const refs = (sc.refs ?? []).filter((r) => r && typeof r.url === 'string' && /^https?:\/\//.test(r.url) && r.url !== sc.sourceUrl);
   const source =
-    sc.sourceUrl || sc.source
-      ? h('p', { class: 'source-note' }, '出典: ', sc.sourceUrl ? extLink(sc.sourceUrl, sc.source || sc.sourceUrl) : sc.source ?? '')
+    sc.sourceUrl || sc.source || refs.length
+      ? h(
+          'div',
+          { class: 'source-note scenario-sources' },
+          sc.sourceUrl || sc.source ? h('p', null, '出典: ', sc.sourceUrl ? extLink(sc.sourceUrl, sc.source || sc.sourceUrl) : sc.source ?? '') : null,
+          refs.length ? h('p', null, 'あわせて参照:') : null,
+          refs.length ? h('ul', { class: 'scenario-refs' }, refs.map((r) => h('li', null, extLink(r.url, r.label || r.url)))) : null,
+        )
       : null;
-  return h('li', { class: 'scenario-card', dataset: { id: sc.id } }, btn, desc, source);
+  const more = h('div', { class: 'scenario-more' }, desc, basisEl, assumeEl, source);
+  return h('li', { class: 'scenario-card', dataset: { id: sc.id } }, btn, more);
 }
 
 function scenarioSection(ctx: UIContext): HTMLElement {
@@ -255,10 +308,20 @@ function scenarioSection(ctx: UIContext): HTMLElement {
       true,
     ),
   );
+  const notes = SCENARIO_NOTES.filter((n) => typeof n === 'string' && n.trim());
+  const notesEl = notes.length
+    ? h(
+        'details',
+        { class: 'callout callout-info scenario-notes' },
+        h('summary', { class: 'callout-title' }, icon('info', 18), `シナリオの値についての注意（${notes.length}件）`),
+        h('ul', null, notes.map((n) => h('li', null, n))),
+      )
+    : null;
   return h(
     'section',
     { class: 'section' },
     h('h2', { class: 'section-title' }, icon('wave', 18), '地震・津波のシナリオ'),
+    notesEl,
     h('ul', { class: 'scenario-list' }, cards),
     h('p', { class: 'field-hint' }, '「公的想定」は国や県などが公表した想定にもとづく値、「説明用の例」は仕組みを理解するための代表例です。高さは T.P.（東京湾平均海面）基準です。'),
   );
@@ -271,7 +334,7 @@ function scenarioSection(ctx: UIContext): HTMLElement {
 const RESOLUTION_OPTIONS: { value: Resolution; label: string; note: string }[] = [
   { value: 'coarse', label: '粗い（約31 m）', note: '計算が速く、メモリも少なめ' },
   { value: 'standard', label: '標準（約16 m）', note: '通常はこちら' },
-  { value: 'fine', label: '細かい（約8 m）', note: 'セル数が標準の約4倍、計算時間は約8倍が目安。端末によってはメモリ不足になることがあります' },
+  { value: 'fine', label: '細かい（約8 m）', note: '計算時間は標準の約8倍（セル数約4倍×時間刻み約1/2）。端末によってはメモリ不足になることがあります' },
 ];
 
 /** 陸域の粗度係数の目安（小谷ほか(1998)。国土交通省「津波浸水想定の設定の手引き」で用いられている値）
@@ -327,6 +390,15 @@ function paramsSection(ctx: UIContext): HTMLElement {
   ctx.scope.add(store.select((s) => s.params, renderModified, true));
   ctx.scope.add(store.select((s) => s.scenarioId, renderModified));
 
+  // 「細かい」を選んだときの注意
+  const fineWarning = h(
+    'div',
+    { class: 'callout callout-warning compact', role: 'note' },
+    icon('alert', 16),
+    h('span', null, '「細かい」は「標準」の約8倍の計算時間がかかります（標準で1分かかる端末なら約8分）。スマートフォンなどでは計算が終わらなかったり、メモリ不足で止まったりすることがあります。'),
+  );
+  ctx.scope.add(store.select((s) => s.params.resolution, (r) => setHidden(fineWarning, r !== 'fine'), true));
+
   const body = h(
     'div',
     { class: 'details-body' },
@@ -343,12 +415,13 @@ function paramsSection(ctx: UIContext): HTMLElement {
       commit: (v) => actions.updateScenario({ coastHeight: v }),
     }),
     sliderField(ctx, {
-      label: '到達時間（第1波の最大）',
+      label: '最大波の到達時間',
       unit: '分',
       min: 1,
       max: 120,
       step: 1,
       digits: 0,
+      hint: '地震発生から、海岸で最大の波が来るまでの時間。公的資料の「最大津波到達時間」にあたります。このモデルでは第1波を最大とし、この時刻に最大になるよう波を入れます（実際には、より前に小さな波が来ることがあります）。',
       get: (s) => s.params.scenario.arrivalMin,
       commit: (v) => actions.updateScenario({ arrivalMin: v }),
     }),
@@ -410,6 +483,7 @@ function paramsSection(ctx: UIContext): HTMLElement {
       get: (s) => s.params.resolution,
       commit: (v) => actions.updateParams({ resolution: v }),
     }),
+    fineWarning,
     sliderField(ctx, {
       label: '陸域の粗度係数 n',
       min: 0.02,
@@ -454,6 +528,10 @@ function resultsSection(ctx: UIContext): HTMLElement {
     h('span', null, '条件が変更されています。表示中の結果は変更前の条件によるものです。再実行してください。'),
   );
   const title = h('h2', { class: 'section-title' }, icon('drop', 18), '計算結果', partial);
+  // 計算側の注記（到達時間の補正・振幅の制限など。sim の出力が notes を持つ場合）
+  const simNotesList = h('ul');
+  const simNotes = h('div', { class: 'callout callout-info compact sim-notes', role: 'note' }, icon('info', 16), h('div', null, h('strong', null, '計算についての注記'), simNotesList));
+  let lastNotesKey = '';
 
   const stat = (label: string, value: HTMLElement, sub?: HTMLElement) => h('div', { class: 'stat' }, h('span', { class: 'stat-label' }, label), value, sub ?? null);
   const section = h(
@@ -474,6 +552,7 @@ function resultsSection(ctx: UIContext): HTMLElement {
       { class: 'field-hint' },
       'いずれもこのサイトの簡易計算による値です。公的な想定や実際の津波とは異なります。',
     ),
+    simNotes,
     h('details', { class: 'notes' }, h('summary', null, '計算の調整について'), h('p', { class: 'small' }, amp)),
   );
 
@@ -508,6 +587,13 @@ function resultsSection(ctx: UIContext): HTMLElement {
         setText(first, running ? '—' : '浸水なし');
         setText(firstSub, running ? 'まだ浸水していません' : `計算した${formatElapsed(out.durationSec)}の間`);
       }
+      const notes = outputNotes(out);
+      const notesKey = notes.join('\n');
+      if (notesKey !== lastNotesKey) {
+        lastNotesKey = notesKey;
+        simNotesList.replaceChildren(...notes.map((n) => h('li', null, n)));
+      }
+      setHidden(simNotes, notes.length === 0);
       setText(maxd, sm ? formatDepth(sm.maxDepth) : '—');
       setText(area, sm ? formatArea(sm.areaM2) : '—');
       const a = out.calibration?.boundaryAmplitude;
@@ -521,6 +607,12 @@ function resultsSection(ctx: UIContext): HTMLElement {
     }),
   );
   return section;
+}
+
+/** 計算結果の注記（sim の実装が notes: string[] を持つ場合のみ） */
+function outputNotes(out: unknown): string[] {
+  const notes = (out as { notes?: unknown } | null)?.notes;
+  return Array.isArray(notes) ? notes.filter((n): n is string => typeof n === 'string' && n.trim() !== '') : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -573,7 +665,10 @@ function runBar(ctx: UIContext): HTMLElement {
     setText(msg, s.sim.message || '計算中…');
     setText(runLabel, s.sim.output ? 'この条件で再計算' : 'シミュレーション実行');
     let subText = '';
-    if (!running) {
+    if (running && s.sim.auto) {
+      const sc = getScenario(s.scenarioId);
+      subText = `初めて開いたときの自動計算です（${sc?.shortName ?? s.params.scenario.shortName}・震度${SHINDO_LABEL[s.shindo]}）。中止して条件を変えられます。`;
+    } else if (!running) {
       if (s.terrain.status === 'loading') subText = queued ? '地形データの読み込みが終わると自動で計算を始めます。' : '地形データの読み込み中です。実行すると、読み込み後に計算を始めます。';
       else if (s.terrain.status === 'error') subText = '実行すると、地形データの読み込みを再試行します。';
       else subText = `地震発生から${formatMinutes(s.params.durationMin)}後までを計算します。`;

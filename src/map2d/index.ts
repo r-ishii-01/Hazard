@@ -22,9 +22,9 @@ import {
 } from 'maplibre-gl';
 import type { AppStore } from '../core/store';
 import type { AppActions } from '../core/controller';
-import { CELL_SEA, type AppState, type Basemap, type SimOutput, type TerrainGrid } from '../core/types';
+import { CELL_SEA, type AppState, type Basemap, type CursorInfo, type SimOutput, type TerrainGrid } from '../core/types';
 import { INITIAL_CENTER, INITIAL_ZOOM, createGridSpec, gridCornerCoordinates, lonLatToCell, type GridSpec } from '../core/geo';
-import { BASEMAPS } from '../data/sources';
+import { BASEMAPS, DEM_CREDIT_HTML } from '../data/sources';
 import { POIS, POI_ATTRIBUTION } from '../data/poi';
 import { PERSON_PROFILES } from '../people';
 import { sampleGround } from '../terrain';
@@ -33,11 +33,13 @@ import { CellCanvas, buildFloodReference, paintArrival, paintFlood, paintMaxDept
 import { IDS, SIM_OPACITY, basemapLayer, basemapLayerId, buildStyle, domainGeoJSON, rasterSource } from './style';
 import { PeopleLayer, type PeopleContext } from './people';
 import { PoiLayer, ShelterLayer, createDomainLabel } from './shelters';
+import { registerHazardProtocol, setHazardMaskGrid } from './hazardTiles';
 // MapLibre v6 のワーカーは別ファイル。Vite の事前バンドル／本番ビルドでは既定の相対 URL が解決できないので、
 // Vite にワーカーとしてバンドルさせ、その URL を明示する。
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 
 setWorkerUrl(maplibreWorkerUrl);
+registerHazardProtocol();
 
 type Coords = [[number, number], [number, number], [number, number], [number, number]];
 
@@ -134,6 +136,8 @@ export class MapView2D {
   private ref: FloodReference | null = null;
   private lastFloodPaint = -Infinity;
   private lastGrowingPaint = -Infinity;
+  /** 最大浸水深・到達時間を描いたときの計算結果の更新番号 */
+  private growingRevision: number | null = null;
   private lastRoutes = -Infinity;
 
   // 重ねる要素
@@ -173,6 +177,7 @@ export class MapView2D {
 
     const s = store.get();
     const spec = this.currentSpec(s);
+    setHazardMaskGrid(s.terrain.grid);
     try {
       this.map = new MapLibreMap({
         container: this.root,
@@ -205,6 +210,8 @@ export class MapView2D {
     const map = this.map;
     this.shownBasemaps.add(s.basemap);
     this.currentBasemap = s.basemap;
+    // 注記のある背景地図（淡色・標準）では、駅名が地図にも書かれていて二重になるので駅の地点ラベルを出さない
+    this.root.classList.toggle('m2d-basemap-labeled', s.basemap !== 'photo');
     this.root.append(this.hint, this.toast);
 
     map.touchZoomRotate.disableRotation();
@@ -294,6 +301,7 @@ export class MapView2D {
       if (s.layers.simFlood && !p.layers.simFlood) d.flood = true;
       if ((s.layers.maxDepth && !p.layers.maxDepth) || (s.layers.arrival && !p.layers.arrival)) d.growing = true;
     }
+    if (s.terrain.grid !== p.terrain.grid) setHazardMaskGrid(s.terrain.grid);
     if (s.terrain.grid !== p.terrain.grid || s.params.resolution !== p.params.resolution) {
       d.domain = d.flood = d.growing = d.people = d.routes = d.layers = d.attribution = any = true;
     }
@@ -376,6 +384,15 @@ export class MapView2D {
     if (d.growing) {
       if ((!s.layers.maxDepth && !s.layers.arrival) || !data) d.growing = false;
       else if (
+        // 計算中に進み具合だけが変わった（出力の中身は同じ）なら描き直さない
+        s.sim.status === 'running' &&
+        this.growingRevision !== null &&
+        outputRevision(data.output) === this.growingRevision &&
+        (!s.layers.maxDepth || this.rasters.maxDepth.output === data.output) &&
+        (!s.layers.arrival || this.rasters.arrival.output === data.output)
+      )
+        d.growing = false;
+      else if (
         s.sim.status !== 'running' ||
         now - this.lastGrowingPaint >= GROWING_INTERVAL_MS ||
         (s.layers.maxDepth && this.rasters.maxDepth.output !== data.output) ||
@@ -383,6 +400,7 @@ export class MapView2D {
       ) {
         d.growing = false;
         this.lastGrowingPaint = now;
+        this.growingRevision = outputRevision(data.output);
         step('growing', () => this.paintGrowingLayers(map, data.grid, data.output, s));
       }
     }
@@ -454,6 +472,7 @@ export class MapView2D {
       map.setLayoutProperty(basemapLayerId(other), 'visibility', other === b ? 'visible' : 'none');
     }
     this.currentBasemap = b;
+    this.root.classList.toggle('m2d-basemap-labeled', b !== 'photo');
   }
 
   private applyLayers(map: MapLibreMap, s: AppState, output: SimOutput | null): void {
@@ -496,7 +515,7 @@ export class MapView2D {
     const text =
       grid && grid.source === 'synthetic'
         ? '浸水計算: 近似（合成）地形による試算'
-        : '浸水計算: <a href="https://maps.gsi.go.jp/development/ichiran.html#dem" target="_blank" rel="noopener">国土地理院の標高タイルを加工して作成</a>';
+        : `浸水計算の地形: ${DEM_CREDIT_HTML}`;
     for (const r of Object.values(this.rasters)) {
       const src = map.getSource(r.id) as (ImageSource & { attribution?: string }) | undefined;
       if (src) src.attribution = text;
@@ -558,7 +577,8 @@ export class MapView2D {
   }
 
   private paintGrowingLayers(map: MapLibreMap, grid: TerrainGrid, output: SimOutput, s: AppState): void {
-    const key = `${output.framesReady()}|${s.sim.status}`;
+    // sim の出力が更新番号（revision）を持てばそれで判定する（最大値・到達時間は同じ配列が書き換わるため）
+    const key = `${outputRevision(output) ?? output.framesReady()}|${s.sim.status}`;
     if (s.layers.maxDepth) {
       const r = this.rasters.maxDepth;
       const sizeChanged = r.canvas.ensure(grid.spec.nx, grid.spec.ny);
@@ -663,23 +683,32 @@ export class MapView2D {
     const grid = s.terrain.grid;
     let ground: number | null = null;
     let depth: number | null = null;
+    let kind: CursorInfo['kind'];
+    let waterDepth: number | undefined;
     if (grid) {
       try {
         ground = sampleGround(grid, m.lon, m.lat);
       } catch (e) {
         this.logOnce('sampleGround', e);
       }
+      const cell = lonLatToCell(grid.spec, m.lon, m.lat);
+      if (cell) kind = grid.kind[cell.k] === CELL_SEA ? 'sea' : 'land';
     }
     const data = this.simData(s);
     if (data && data.output.framesReady() > 0) {
       const cell = lonLatToCell(data.output.spec, m.lon, m.lat);
-      // 海・川のセルの全水深は「浸水深」ではないので出さない（地盤高＝海底の高さだけを示す）
-      if (cell && data.grid.kind[cell.k] !== CELL_SEA) {
-        const v = data.output.depthAt(Math.max(0, s.time.t), cell.k);
-        depth = Number.isFinite(v) ? Math.max(0, v) : null;
+      if (cell) {
+        const t = Math.max(0, Math.min(s.time.t, data.output.timeReady()));
+        const v = data.output.depthAt(t, cell.k);
+        if (data.grid.kind[cell.k] === CELL_SEA) {
+          // 海・川のセルの全水深は「浸水深」ではないので、水深として別に渡す
+          if (Number.isFinite(v)) waterDepth = Math.max(0, v);
+        } else {
+          depth = Number.isFinite(v) ? Math.max(0, v) : null;
+        }
       }
     }
-    this.actions.setCursor({ lon: m.lon, lat: m.lat, ground: ground ?? null, depth });
+    this.actions.setCursor({ lon: m.lon, lat: m.lat, ground: ground ?? null, depth, kind, waterDepth });
   }
 
   private onZoom = (): void => {
@@ -754,6 +783,12 @@ export class MapView2D {
 function initialZoom(width: number): number {
   if (!(width > 0) || width >= 800) return INITIAL_ZOOM;
   return Math.max(12.5, INITIAL_ZOOM - Math.log2(800 / width));
+}
+
+/** 計算結果の更新番号（sim の実装が revision を持つ場合のみ） */
+function outputRevision(output: SimOutput): number | null {
+  const r = (output as SimOutput & { revision?: unknown }).revision;
+  return typeof r === 'number' && Number.isFinite(r) ? r : null;
 }
 
 function clamp01(v: number): number {

@@ -249,6 +249,136 @@
 }
 
 
+/* 凡例（右端の中央。四隅は地図の操作部品・出典、下中央は状態チップが使う） */
+.hud-legend {
+  position: absolute;
+  top: 50%;
+  right: var(--sp-3);
+  display: grid;
+  width: 176px;
+  max-height: calc(100% - 150px);
+  overflow: hidden;
+  border: 1px solid rgb(15 27 45 / 0.14);
+  border-radius: var(--radius);
+  background: rgb(255 255 255 / 0.95);
+  color: var(--navy-900);
+  box-shadow: var(--shadow-2);
+  pointer-events: auto;
+  transform: translateY(-50%);
+}
+
+.hud-legend[hidden] {
+  display: none;
+}
+
+.hud-legend.is-collapsed {
+  width: auto;
+}
+
+.hud-legend-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.hud-legend-toggle:hover {
+  background: rgb(15 27 45 / 0.05);
+}
+
+.hud-legend-chev {
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--text-3);
+}
+
+.hud-legend-body {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  padding: 0 10px 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.hud-legend-body[hidden] {
+  display: none;
+}
+
+.hud-legend-block {
+  display: grid;
+  gap: 4px;
+}
+
+.hud-legend-block[hidden] {
+  display: none;
+}
+
+.hud-legend-head {
+  display: grid;
+  line-height: 1.35;
+}
+
+.hud-legend-title {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.hud-legend-sub {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.hud-legend-list {
+  display: grid;
+  gap: 1px;
+  list-style: none;
+  font-size: 11.5px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-legend-list[hidden] {
+  display: none;
+}
+
+.hud-legend-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hud-swatch {
+  flex: none;
+  width: 18px;
+  height: 11px;
+  border: 1px solid rgb(15 27 45 / 0.25);
+  border-radius: 2px;
+}
+
+.hud-legend-sea {
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+}
+
+.hud-legend-note {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.hud-legend-note[hidden] {
+  display: none;
+}
+
 @media (max-width: 819.98px) {
   .hud-tl {
     top: var(--sp-2);
@@ -308,5 +438,35 @@
 
   .hud-bc .hud-chip {
     max-width: 100%;
+  }
+
+  .hud-legend {
+    right: var(--sp-2);
+    width: 138px;
+    max-height: calc(100% - 120px);
+  }
+
+  .hud-legend-toggle {
+    min-height: 30px;
+    padding: 3px 8px;
+    font-size: 11.5px;
+  }
+
+  .hud-legend-body {
+    gap: 8px;
+    padding: 0 8px 8px;
+  }
+
+  .hud-legend-list {
+    font-size: 10.5px;
+  }
+
+  .hud-swatch {
+    width: 14px;
+    height: 10px;
+  }
+
+  .hud-legend-note {
+    display: none;
   }
 }

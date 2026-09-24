@@ -11,6 +11,7 @@ import { selectField, sliderField } from '../fields';
 import { formatDepth, formatDistance, formatElapsed, isSafeColor, readableTextColor } from '../format';
 import { icon } from '../icons';
 import { niceTicks, timeTickStep } from '../series';
+import { sheltersInfoLine } from '../shelterInfo';
 import { STATUS_ORDER, statusDescription, statusMeta, statusSeverity, thresholdInfos, type ThresholdInfo } from '../status';
 
 const EVAC_LABEL: Record<EvacMode, string> = {
@@ -220,6 +221,7 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
       h('p', { class: 'section-lead' }, '種類を選んで地図上をクリックすると、地震発生時にその場所にいた人を置けます。避難の様子と、その場所の浸水の深さを確かめられます。'),
       h('div', { class: 'place-grid', role: 'group', 'aria-label': '配置する人物の種類' }, placeButtons),
       hint,
+      sheltersInfoLine(ctx, '避難先の避難場所'),
     ),
     h(
       'section',

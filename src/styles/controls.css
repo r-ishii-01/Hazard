@@ -646,3 +646,33 @@ details.notes ul {
 details.notes p {
   margin-top: 4px;
 }
+
+/* 公式の津波浸水想定の説明（レイヤーの切り替えのすぐ下） */
+.hazard-about {
+  display: grid;
+  gap: 4px;
+  margin: -4px 0 var(--sp-3);
+}
+
+.hazard-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-s);
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.hazard-notice > .icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+.switch-field > .shelters-info {
+  margin: -4px 0 var(--sp-3);
+}

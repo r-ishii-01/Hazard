@@ -152,7 +152,51 @@
 
 .terrain-ok {
   display: grid;
-  gap: 2px;
+  gap: 4px;
+}
+
+.terrain-credit {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.terrain-credit > .icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--text-3);
+}
+
+/* 出典表記は長いので、括弧の途中でも自然に折り返す */
+.terrain-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-break: strict;
+}
+
+.terrain-credit-head {
+  font-weight: 700;
+  color: var(--navy-900);
+}
+
+.terrain-meta {
+  padding-left: 24px;
+  font-size: 12px;
+}
+
+.terrain-notes {
+  padding-left: 24px;
+}
+
+.terrain-notes ul {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 /* ---- 震度 ------------------------------------------------------------------ */
@@ -194,8 +238,10 @@
 }
 
 .shindo-suffix {
-  font-size: 12px;
-  font-weight: 700;
+  /* 小さい文字なので太くし、背景とのコントラスト比 4.5:1 以上の文字色（--sh-fg）をそのまま使う */
+  color: var(--sh-fg);
+  font-size: 12.5px;
+  font-weight: 800;
 }
 
 .intensity-card {
@@ -329,18 +375,135 @@
   font-weight: 700;
 }
 
+.scenario-more {
+  display: grid;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3) var(--sp-3);
+  min-width: 0;
+}
+
+.scenario-card:not(.is-selected) .scenario-more {
+  display: none;
+}
+
 .scenario-desc {
-  padding: 0 var(--sp-3) var(--sp-2);
   font-size: 12.5px;
   color: var(--text-2);
 }
 
-.scenario-card:not(.is-selected) .scenario-desc {
+.scenario-basis {
+  padding: 6px 8px;
+  border-radius: var(--radius-s);
+  background: rgb(255 255 255 / 0.7);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.scenario-basis strong {
+  color: var(--navy-900);
+}
+
+.scenario-assume ul {
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.scenario-sources p + p,
+.scenario-sources ul {
+  margin-top: 2px;
+}
+
+.scenario-refs {
+  display: grid;
+  gap: 2px;
+  padding-left: 1.2em;
+  list-style: disc;
+}
+
+.scenario-sources a,
+.url-link {
+  overflow-wrap: anywhere;
+}
+
+/* シナリオ全体の注意（details を callout の見た目に） */
+details.scenario-notes {
+  display: block;
+  margin-bottom: var(--sp-2);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+details.scenario-notes > summary {
+  display: flex;
+  cursor: pointer;
+  list-style: none;
+}
+
+details.scenario-notes > summary::-webkit-details-marker {
   display: none;
 }
 
-.scenario-card > .source-note {
-  padding: 0 var(--sp-3) var(--sp-3);
+details.scenario-notes > summary::after {
+  content: "詳しく";
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ocean-700);
+  text-decoration: underline;
+}
+
+details.scenario-notes[open] > summary::after {
+  content: "閉じる";
+}
+
+details.scenario-notes ul {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  padding-left: 1.2em;
+  color: var(--text-2);
+}
+
+/* 計算側の注記 */
+.sim-notes ul {
+  margin-top: 2px;
+  padding-left: 1.2em;
+}
+
+/* 避難場所データの出所 */
+.shelters-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.shelters-info > .icon {
+  flex: none;
+  margin-top: 3px;
+}
+
+.shelters-info a {
+  color: var(--text-2);
+}
+
+.shelters-info-count {
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+.shelters-info-warn {
+  display: block;
+  margin-top: 2px;
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.shelters-info-warn[hidden] {
+  display: none;
 }
 
 /* ---- 結果 ------------------------------------------------------------------ */
@@ -407,9 +570,18 @@
   text-align: center;
 }
 
+.run-bar > * {
+  min-width: 0;
+}
+
 .run-progress {
   display: grid;
   gap: var(--sp-2);
+  min-width: 0;
+}
+
+.run-progress-head > .btn {
+  flex: none;
 }
 
 .run-progress-head {
@@ -976,4 +1148,24 @@
 
 .disclaimer-list strong {
   color: var(--text);
+}
+
+/* 情報タブの凡例: 公式の津波浸水想定の説明 */
+.legend-hazard-note {
+  display: grid;
+  gap: 6px;
+  margin: var(--sp-2) 0 var(--sp-3);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+.source-list .source-li-shelters {
+  list-style: none;
+  margin-left: -1.1em;
+}
+
+.source-list .shelters-info {
+  font-size: inherit;
+  color: inherit;
 }

@@ -236,3 +236,24 @@ export function safeAttributionHTML(html: string): DocumentFragment {
 export function extLink(href: string, text: string, cls?: string): HTMLAnchorElement {
   return h('a', { href, target: '_blank', rel: 'noopener noreferrer', class: cls }, text);
 }
+
+/**
+ * 文中の URL（http/https）をリンクにした DOM を返す（データ由来の注記の表示用）。
+ * URL の直後の全角括弧・句読点はリンクに含めない。
+ */
+export function linkifyText(text: string): DocumentFragment {
+  const frag = document.createDocumentFragment();
+  const re = /https?:\/\/[^\s（）「」、。，]+/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    let url = m[0];
+    // 末尾の半角の句読点・閉じ括弧はリンクから外す
+    const trail = /[).,;:]+$/.exec(url)?.[0] ?? '';
+    if (trail) url = url.slice(0, -trail.length);
+    if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+    frag.appendChild(h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', class: 'url-link' }, url));
+    last = m.index + url.length;
+  }
+  if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+  return frag;
+}

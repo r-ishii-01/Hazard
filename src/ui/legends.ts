@@ -13,11 +13,11 @@ function swatchList(items: { label: string; color: string }[], cls: string): HTM
   );
 }
 
-export function depthLegend(): HTMLElement {
+export function depthLegend(caption = '浸水深'): HTMLElement {
   return h(
     'figure',
     { class: 'legend-block' },
-    h('figcaption', null, '浸水深'),
+    h('figcaption', null, caption),
     swatchList(DEPTH_CLASSES.map((c) => ({ label: c.label, color: c.color })), 'legend-depth'),
   );
 }

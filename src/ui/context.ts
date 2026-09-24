@@ -55,6 +55,14 @@ export interface OutputSnapshot {
   summary: (OutputSummary & { coastMax: number; areaM2: number }) | null;
   /** 変化のたびに増える */
   version: number;
+  /** 集計したときの計算結果の更新番号（sim の実装が revision を持つ場合。無ければ null） */
+  revision: number | null;
+}
+
+/** 計算結果の更新番号（sim の実装が revision を持つ場合のみ） */
+export function outputRevision(out: SimOutput | null): number | null {
+  const r = (out as (SimOutput & { revision?: unknown }) | null)?.revision;
+  return typeof r === 'number' && Number.isFinite(r) ? r : null;
 }
 
 /**
@@ -62,7 +70,7 @@ export interface OutputSnapshot {
  * 実行中は一定間隔で問い合わせて、集計値（最初の浸水・最大浸水深など）を更新する。
  */
 export class OutputWatcher {
-  snap: OutputSnapshot = { output: null, timeReady: 0, gaugeCount: 0, summary: null, version: 0 };
+  snap: OutputSnapshot = { output: null, timeReady: 0, gaugeCount: 0, summary: null, version: 0, revision: null };
   private listeners = new Set<(s: OutputSnapshot) => void>();
   private timer = 0;
 
@@ -96,12 +104,19 @@ export class OutputWatcher {
   poll(force = false): void {
     const out = this.store.get().sim.output;
     if (!out) {
-      if (this.snap.output !== null || force) this.emit({ output: null, timeReady: 0, gaugeCount: 0, summary: null, version: this.snap.version + 1 });
+      if (this.snap.output !== null || force) this.emit({ output: null, timeReady: 0, gaugeCount: 0, summary: null, version: this.snap.version + 1, revision: null });
       return;
     }
     const timeReady = safeCall(() => out.timeReady(), 0);
     const gaugeCount = safeCall(() => out.gauge.count(), 0);
-    if (!force && out === this.snap.output && timeReady === this.snap.timeReady && gaugeCount === this.snap.gaugeCount) return;
+    const revision = outputRevision(out);
+    // 更新番号があれば、それが変わっていない限り集計し直さない（最大値の配列は同じものが書き換わる）
+    const same =
+      out === this.snap.output &&
+      timeReady === this.snap.timeReady &&
+      gaugeCount === this.snap.gaugeCount &&
+      (revision === null || revision === this.snap.revision);
+    if (!force && same) return;
     let summary: OutputSnapshot['summary'] = null;
     try {
       const base = summarizeArrays(out.arrival, out.maxDepth);
@@ -110,7 +125,7 @@ export class OutputWatcher {
     } catch (e) {
       console.warn('[ui] 計算結果の集計に失敗しました', e);
     }
-    this.emit({ output: out, timeReady, gaugeCount, summary, version: this.snap.version + 1 });
+    this.emit({ output: out, timeReady, gaugeCount, summary, version: this.snap.version + 1, revision });
   }
 
   private emit(next: OutputSnapshot): void {

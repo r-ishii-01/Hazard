@@ -4,11 +4,12 @@
 import { SPEED_OPTIONS } from '../core/controller';
 import type { AppState } from '../core/types';
 import { WARNING_INFO } from '../data/warnings';
+import { getScenario } from '../data/scenarios';
 import { safeCall, timelineDuration, type UIContext } from './context';
 import { h, s as svg, setAttr, setHidden, setText, uid } from './dom';
 import { clamp, formatClock, formatElapsed, formatTP } from './format';
 import { icon } from './icons';
-import { WARNING_ISSUE_SEC } from './hud';
+import { JMA_ISSUE_TARGET_LABEL, warningShowSec } from './hud';
 import { interpolateSeries, linePath, seriesExtent } from './series';
 
 const SPARK_W = 1000;
@@ -19,6 +20,8 @@ interface Marker {
   label: string;
   color: string;
   t: number;
+  /** ツールチップに添える説明 */
+  note?: string;
 }
 
 export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
@@ -59,7 +62,7 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
   // ---- 時刻表示 -------------------------------------------------------------------------
   const nowEl = h('span', { class: 'tl-now' }, '0:00');
   const durEl = h('span', { class: 'tl-dur' }, '/ 60:00');
-  const waitEl = h('span', { class: 'tl-wait', hidden: true }, '計算待ち…');
+  const waitEl = h('span', { class: 'tl-wait', hidden: true, title: '再生が計算に追いついたため、計算の進み具合に合わせて再生しています' }, '計算に合わせて再生中');
 
   el.replaceChildren(
     h('div', { class: 'tl-controls' }, playBtn, h('label', { class: 'visually-hidden', for: speedId }, '再生速度'), speedSel),
@@ -100,7 +103,9 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
     }
     const out = s.sim.output;
     const tr = ctx.watcher.snap.timeReady;
-    setHidden(waitEl, !(s.time.playing && out && s.sim.status === 'running' && tr < duration && t >= tr - 0.5));
+    // 再生が計算済みの時刻に近づくと、コントローラーが計算の速さに合わせて再生する（数フレーム手前を追う）
+    const lag = out ? safeCall(() => out.frameInterval, 20) * 2.5 : 0;
+    setHidden(waitEl, !(s.time.playing && out && s.sim.status === 'running' && tr < duration && t >= tr - lag));
   };
 
   const renderDuration = () => {
@@ -129,20 +134,33 @@ export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
     const list: Marker[] = [];
     if (sc.shakingSec > 0) list.push({ id: 'shake', label: '揺れ終了', color: '#64748b', t: sc.shakingSec });
     const w = WARNING_INFO[sc.warning];
-    if (w && sc.warning !== 'none') list.push({ id: 'warn', label: `${w.label}の目安`, color: '#7e22ce', t: WARNING_ISSUE_SEC });
-    list.push({ id: 'arrival', label: '想定到達時刻', color: '#d97706', t: sc.arrivalMin * 60 });
+    // 近くの地震は気象庁の発表目標（約3分）。遠地津波の例は発表時刻を示さない
+    const warnAt = warningShowSec(sc);
+    if (w && warnAt !== null && sc.warning !== 'forecast') {
+      list.push({ id: 'warn', label: `${w.label}の目安`, color: '#7e22ce', t: warnAt, note: `気象庁の発表目標（地震発生から${JMA_ISSUE_TARGET_LABEL}）` });
+    }
+    const basis = (getScenario(sc.id)?.arrivalBasis ?? '').trim();
+    list.push({ id: 'arrival', label: '最大波の想定時刻', color: '#d97706', t: sc.arrivalMin * 60, note: basis ? `根拠: ${basis}` : undefined });
     const first = ctx.watcher.snap.output ? ctx.watcher.snap.summary?.firstArrival : undefined;
     if (first !== undefined && Number.isFinite(first)) list.push({ id: 'flood', label: '最初の浸水（計算）', color: '#dc2626', t: first });
 
     const visible = list.filter((m) => m.t >= 0 && m.t <= duration);
     markerLayer.replaceChildren(
-      ...visible.map((m) => h('span', { class: 'tl-marker', dataset: { id: m.id }, style: { left: `${(m.t / duration) * 100}%`, '--mk': m.color }, title: `${m.label} ${formatClock(m.t)}` })),
+      ...visible.map((m) =>
+        h('span', { class: 'tl-marker', dataset: { id: m.id }, style: { left: `${(m.t / duration) * 100}%`, '--mk': m.color }, title: [`${m.label} ${formatClock(m.t)}`, m.note].filter(Boolean).join('\n') }),
+      ),
     );
     chips.replaceChildren(
       ...visible.map((m) =>
         h(
           'button',
-          { type: 'button', class: 'tl-chip', style: { '--mk': m.color }, title: `${m.label}（地震発生から${formatElapsed(m.t)}）へ移動`, onclick: () => seek(m.t) },
+          {
+            type: 'button',
+            class: 'tl-chip',
+            style: { '--mk': m.color },
+            title: [`${m.label}（地震発生から${formatElapsed(m.t)}）へ移動`, m.note].filter(Boolean).join('\n'),
+            onclick: () => seek(m.t),
+          },
           h('span', { class: 'tl-chip-dot', 'aria-hidden': 'true' }),
           h('span', null, m.label),
           h('span', { class: 'tl-chip-time' }, formatClock(m.t)),

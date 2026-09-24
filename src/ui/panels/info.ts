@@ -1,22 +1,15 @@
 /**
  * 「情報」タブ: 凡例、モデルのしくみと限界、出典、注意事項。
  */
-import { GSI_ATTRIBUTION, HAZARD_TSUNAMI_TILES, OPENFREEMAP } from '../../data/sources';
+import { DEM_CREDIT_HTML, GSI_ATTRIBUTION, HAZARD_PORTAL_NOTICE, HAZARD_TSUNAMI_TILES, OPENFREEMAP } from '../../data/sources';
 import { SCENARIOS } from '../../data/scenarios';
 import type { UIContext } from '../context';
 import { extLink, h, safeAttributionHTML } from '../dom';
 import { disclaimerBody } from '../disclaimer';
 import { icon } from '../icons';
 import { arrivalLegend, depthLegend } from '../legends';
-import {
-  DISAPORTAL_URL,
-  FUJISAWA_TSUNAMI_HAZARDMAP_URL,
-  GSI_DEM_TILE_URL,
-  GSI_SHELTER_DATA_URL,
-  JMA_SHINDO_TABLE_URL,
-  JMA_TSUNAMI_WARNING_URL,
-  KANAGAWA_TSUNAMI_SHINSUI_URL,
-} from '../links';
+import { sheltersInfoLine } from '../shelterInfo';
+import { DISAPORTAL_URL, FUJISAWA_TSUNAMI_HAZARDMAP_URL, GSI_DEM_TILE_URL, JMA_SHINDO_TABLE_URL, JMA_TSUNAMI_WARNING_URL, KANAGAWA_TSUNAMI_SHINSUI_URL } from '../links';
 
 export function createInfoPanel(ctx: UIContext): HTMLElement {
   // シナリオの出典（重複を除く）
@@ -46,7 +39,21 @@ export function createInfoPanel(ctx: UIContext): HTMLElement {
       ),
       h('button', { type: 'button', class: 'btn btn-ghost btn-sm', onclick: () => ctx.openDisclaimer() }, icon('help', 14), '「ご利用にあたって」をもう一度表示'),
     ),
-    h('section', { class: 'section' }, h('h2', { class: 'section-title' }, icon('layers', 18), '凡例'), depthLegend(), arrivalLegend()),
+    h(
+      'section',
+      { class: 'section' },
+      h('h2', { class: 'section-title' }, icon('layers', 18), '凡例'),
+      depthLegend('浸水深（計算結果・公式の津波浸水想定で共通）'),
+      h(
+        'div',
+        { class: 'legend-hazard-note' },
+        h('p', null, h('strong', null, '公式の津波浸水想定（レイヤー「公式ハザードマップ」）: '), HAZARD_TSUNAMI_TILES.notes ?? ''),
+        h('p', { class: 'hazard-notice' }, icon('alert', 14), h('span', null, HAZARD_PORTAL_NOTICE)),
+        h('p', { class: 'source-note' }, '出典: ', safeAttributionHTML(HAZARD_TSUNAMI_TILES.attribution)),
+      ),
+      arrivalLegend(),
+      h('p', { class: 'field-hint' }, '津波到達時間の色分けは、このサイトの計算結果用のものです（公式の区分ではありません）。'),
+    ),
     h(
       'section',
       { class: 'section prose' },
@@ -73,14 +80,13 @@ export function createInfoPanel(ctx: UIContext): HTMLElement {
         'ul',
         { class: 'source-list' },
         h('li', null, '背景地図・色別標高図: ', safeAttributionHTML(GSI_ATTRIBUTION), '（国土地理院）'),
-        h('li', null, '標高: ', extLink(GSI_DEM_TILE_URL, '国土地理院 標高タイル'), 'を加工して作成'),
+        h('li', null, '標高: ', safeAttributionHTML(DEM_CREDIT_HTML), '（', extLink(GSI_DEM_TILE_URL, '標高タイルの仕様'), '）'),
         h('li', null, '津波浸水想定: ', safeAttributionHTML(HAZARD_TSUNAMI_TILES.attribution), '（', extLink(DISAPORTAL_URL, '重ねるハザードマップ'), '）'),
-        h('li', null, '避難場所: ', extLink(GSI_SHELTER_DATA_URL, '国土地理院 指定緊急避難場所データ'), 'など'),
+        h('li', { class: 'source-li-shelters' }, sheltersInfoLine(ctx, '避難場所')),
         h('li', null, '建物（3D）: ', safeAttributionHTML(OPENFREEMAP.attribution)),
         h('li', null, '震度の解説: ', extLink(JMA_SHINDO_TABLE_URL, '気象庁「気象庁震度階級関連解説表」')),
         h('li', null, '津波警報・注意報: ', extLink(JMA_TSUNAMI_WARNING_URL, '気象庁「津波警報・注意報、津波情報、津波予報について」')),
         h('li', null, extLink(FUJISAWA_TSUNAMI_HAZARDMAP_URL, '藤沢市「津波ハザードマップ」')),
-        h('li', null, extLink(KANAGAWA_TSUNAMI_SHINSUI_URL, '神奈川県「津波浸水想定について」')),
         scenarioSources,
       ),
     ),

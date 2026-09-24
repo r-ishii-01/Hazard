@@ -53,6 +53,12 @@ export function mountUI(root: HTMLElement, store: AppStore, actions: AppActions)
   const mobile = window.matchMedia(MOBILE_QUERY);
   const disclaimer = createDisclaimer();
   scope.add(disclaimer.dispose);
+  // 「ご利用にあたって」を確認したら、初回の自動計算を許可する（地形の準備ができ次第、既定のシナリオを再生）
+  let mounted = true;
+  scope.add(() => (mounted = false));
+  disclaimer.whenAcknowledged(() => {
+    if (mounted) actions.armAutoRun();
+  });
   const watcher = new OutputWatcher(store, scope);
 
   const bridge: TabBridge = {

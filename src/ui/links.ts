@@ -7,7 +7,7 @@ import * as warningsModule from '../data/warnings';
 export const FUJISAWA_TSUNAMI_HAZARDMAP_URL = 'https://www.city.fujisawa.kanagawa.jp/bousai/bosai/bosai/hazardmap/tsunami/h25hazardmap.html';
 
 /** 神奈川県 津波浸水想定 */
-export const KANAGAWA_TSUNAMI_SHINSUI_URL = 'http://www.pref.kanagawa.jp/docs/f4i/cnt/f532320/index.html';
+export const KANAGAWA_TSUNAMI_SHINSUI_URL = 'https://www.pref.kanagawa.jp/docs/f4i/cnt/f532320/index.html';
 
 /** 気象庁 震度階級関連解説表 */
 export const JMA_SHINDO_TABLE_URL = 'https://www.jma.go.jp/jma/kishou/know/shindo/kaisetsu.html';

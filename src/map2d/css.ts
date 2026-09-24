@@ -5,6 +5,10 @@
 const CSS = `
 .m2d-root { position: absolute; inset: 0; overflow: hidden; }
 .m2d-root .maplibregl-map { font: 12px/1.4 system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", sans-serif; }
+/* 出典は長いので、左下の縮尺と重ならない幅で折り返す */
+.m2d-root .maplibregl-ctrl-bottom-right { max-width: calc(100% - 150px); }
+.m2d-root .maplibregl-ctrl-bottom-right .maplibregl-ctrl-attrib.maplibregl-compact-show { max-width: 100%; }
+.m2d-root .maplibregl-ctrl-attrib-inner { overflow-wrap: anywhere; }
 .m2d-root.m2d-placing .maplibregl-canvas-container.maplibregl-interactive,
 .m2d-root.m2d-placing .maplibregl-canvas { cursor: crosshair; }
 
@@ -50,6 +54,7 @@ const CSS = `
 }
 .m2d-poi::before { content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #475569; margin-right: 3px; vertical-align: 1px; }
 .m2d-zlow .m2d-poi { display: none; }
+.m2d-basemap-labeled .m2d-poi--station { display: none; }
 
 /* 避難場所 */
 .m2d-shelter { width: 24px; height: 24px; cursor: pointer; }

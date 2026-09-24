@@ -93,7 +93,15 @@ export function distanceMeters(a: LonLat, b: LonLat): number {
 }
 
 /** 対象範囲と解像度からグリッドを作る。原点は 8px 単位にスナップ（全解像度で同じ原点になる）。 */
-export function createGridSpec(resolution: Resolution, bounds = DOMAIN_BOUNDS): GridSpec {
+/** 経緯度の範囲（度） */
+export interface LonLatBounds {
+  west: number;
+  east: number;
+  south: number;
+  north: number;
+}
+
+export function createGridSpec(resolution: Resolution, bounds: LonLatBounds = DOMAIN_BOUNDS): GridSpec {
   const cellPx = RESOLUTION_CELL_PX[resolution];
   const zoom = BASE_ZOOM;
   const snap = 8;

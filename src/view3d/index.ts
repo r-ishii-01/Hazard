@@ -84,6 +84,12 @@ interface Seen {
   attribution: string;
 }
 
+/** 計算結果の更新番号（sim の実装が revision を持つ場合のみ） */
+function outputRevision(output: SimOutput): number | null {
+  const r = (output as SimOutput & { revision?: unknown }).revision;
+  return typeof r === 'number' && Number.isFinite(r) ? r : null;
+}
+
 export class View3D {
   private readonly container: HTMLElement;
   private readonly store: AppStore;
@@ -470,9 +476,9 @@ export class View3D {
       }
     }
 
-    // 最大浸水深・到達時間（頂点色）
+    // 最大浸水深・到達時間（頂点色）。sim の出力が更新番号（revision）を持てばそれで変化を判定する
     const mode = s.layers.maxDepth ? 'maxDepth' : s.layers.arrival ? 'arrival' : 'none';
-    const frames = output ? output.framesReady() : 0;
+    const frames = output ? outputRevision(output) ?? output.framesReady() : 0;
     if (
       grid &&
       (mode !== seen.overlayMode ||
@@ -911,14 +917,17 @@ export class View3D {
     const ll = this.sampler.toLonLat(hit.x, hit.z);
     const ground = this.sampler.height(hit.x, hit.z);
     let depth: number | null = null;
+    let waterDepth: number | undefined;
     const out = s.sim.output;
     const k = this.sampler.cellIndex(hit.x, hit.z);
-    // 海・川のセルの全水深は「浸水深」ではないので出さない（2D 地図と同じ扱い）
-    if (out && out.framesReady() > 0 && k >= 0 && this.sampler.grid.kind[k] !== CELL_SEA) {
+    const sea = k >= 0 && this.sampler.grid.kind[k] === CELL_SEA;
+    if (out && out.framesReady() > 0 && k >= 0 && out.spec.nx === this.sampler.grid.spec.nx && out.spec.ny === this.sampler.grid.spec.ny) {
       const d = out.depthAt(Math.max(0, Math.min(s.time.t, out.timeReady())), k);
-      depth = Number.isFinite(d) ? Math.max(0, d) : null;
+      // 海・川のセルの全水深は「浸水深」ではないので、水深として別に渡す（2D 地図と同じ扱い）
+      if (sea) waterDepth = Number.isFinite(d) ? Math.max(0, d) : undefined;
+      else depth = Number.isFinite(d) ? Math.max(0, d) : null;
     }
-    this.actions.setCursor({ lon: ll.lon, lat: ll.lat, ground, depth });
+    this.actions.setCursor({ lon: ll.lon, lat: ll.lat, ground, depth, kind: k >= 0 ? (sea ? 'sea' : 'land') : undefined, waterDepth });
   }
 
   /** 画面座標 → 地形との交点（ローカル座標）。高さ場をレイマーチングで調べる */

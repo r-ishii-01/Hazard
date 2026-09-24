@@ -54,6 +54,11 @@ export function disclaimerBody(): HTMLElement {
 
 export interface Disclaimer {
   open(): void;
+  /**
+   * 利用者が内容を確認した（モーダルを閉じた、または以前に確認済み）ときに1回呼ぶ。
+   * すでに確認済みなら次のタスクで呼ぶ。
+   */
+  whenAcknowledged(fn: () => void): void;
   dispose(): void;
 }
 
@@ -75,12 +80,28 @@ export function createDisclaimer(): Disclaimer {
       ),
     ),
   );
+  let acknowledged = false;
+  const waiting: (() => void)[] = [];
+  const flushAck = () => {
+    if (acknowledged) return;
+    acknowledged = true;
+    for (const fn of waiting.splice(0)) {
+      try {
+        fn();
+      } catch (e) {
+        console.error('[ui] disclaimer callback failed', e);
+      }
+    }
+  };
   const close = () => {
     writeAck();
     if (dialog.open) dialog.close();
   };
   okBtn.addEventListener('click', close);
-  dialog.addEventListener('close', writeAck);
+  dialog.addEventListener('close', () => {
+    writeAck();
+    flushAck();
+  });
   document.body.appendChild(dialog);
 
   const open = () => {
@@ -93,9 +114,14 @@ export function createDisclaimer(): Disclaimer {
     okBtn.focus();
   };
   if (!readAck()) open();
+  else window.setTimeout(flushAck, 0);
 
   return {
     open,
+    whenAcknowledged: (fn) => {
+      if (acknowledged) window.setTimeout(fn, 0);
+      else waiting.push(fn);
+    },
     dispose: () => {
       if (dialog.open) dialog.close();
       dialog.remove();

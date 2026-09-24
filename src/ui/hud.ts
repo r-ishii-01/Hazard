@@ -2,9 +2,10 @@
  * 地図の上に重ねる表示（HUD）。
  * 時刻は毎フレーム変わるため、必要なノードの textContent / style だけを書き換える。
  */
-import { SHINDO_LABEL, type ShindoLevel } from '../core/types';
+import { SHINDO_LABEL, type AppState, type QuakeScenario, type ShindoLevel } from '../core/types';
 import { INTENSITY_INFO } from '../data/intensity';
-import { WARNING_INFO } from '../data/warnings';
+import { JMA_ISSUE_TARGET_NOTE, JMA_ISSUE_TARGET_SEC, WARNING_INFO } from '../data/warnings';
+import { ARRIVAL_CLASSES, DEPTH_CLASSES, HAZARD_PORTAL_NOTICE, HAZARD_TSUNAMI_TILES } from '../data/sources';
 import { PERSON_PROFILES } from '../people';
 import { safeCall, type UIContext } from './context';
 import { h, setHidden, setText } from './dom';
@@ -13,11 +14,43 @@ import { icon } from './icons';
 import { interpolateSeries } from './series';
 
 /**
- * 津波警報等の発表の目安 [秒]。
- * 気象庁は「地震が発生してから約3分を目標に」大津波警報・津波警報・津波注意報を発表する。
- * 気象庁「津波警報・注意報、津波情報、津波予報について」（URL は links.ts の JMA_TSUNAMI_WARNING_URL）
+ * 遠地津波の例か（揺れを感じない遠くの地震）。
+ * 気象庁の「約3分を目標に発表」は近くの地震の話で、遠地地震では発表までにもっと時間がかかる
+ * （参考にした 2025年7月30日の地震では13分後に津波注意報、76分後に津波警報へ切替: data/scenarios.ts の説明文）。
  */
-export const WARNING_ISSUE_SEC = 180;
+export function isFarField(sc: Pick<QuakeScenario, 'id' | 'shindo'>): boolean {
+  return sc.id === 'example-farfield' || sc.shindo === '0';
+}
+
+/** 気象庁の発表目標の表示（例:「約3分」） */
+export const JMA_ISSUE_TARGET_LABEL = `約${Math.round(JMA_ISSUE_TARGET_SEC / 60)}分`;
+
+/**
+ * 津波警報等が表示される時刻 [秒]。近くの地震は気象庁の発表目標（約3分）、
+ * 遠地津波の例は発表時刻を示さない（null）。
+ */
+export function warningShowSec(sc: Pick<QuakeScenario, 'id' | 'shindo' | 'warning'>): number | null {
+  if (sc.warning === 'none') return null;
+  return isFarField(sc) ? null : JMA_ISSUE_TARGET_SEC;
+}
+
+/** HUD の凡例を折りたたんでいるか（閲覧者ごとの見た目の好みだけを保存） */
+const LEGEND_KEY = 'kugenuma-hud-legend-collapsed';
+function readLegendCollapsed(fallback: boolean): boolean {
+  try {
+    const v = window.localStorage.getItem(LEGEND_KEY);
+    return v === null ? fallback : v === '1';
+  } catch {
+    return fallback;
+  }
+}
+function writeLegendCollapsed(v: boolean): void {
+  try {
+    window.localStorage.setItem(LEGEND_KEY, v ? '1' : '0');
+  } catch {
+    /* 保存できなくても表示には影響しない */
+  }
+}
 
 /** 震度4以上を「強い揺れ」と表示する */
 const STRONG_LEVELS: ShindoLevel[] = ['4', '5-', '5+', '6-', '6+', '7'];
@@ -85,10 +118,15 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
   const cursorText = h('span', { class: 'hud-chip-text' });
   const cursorChip = h('div', { class: 'hud-chip hud-cursor', hidden: true }, icon('crosshair', 16), cursorText);
 
-  // 上中央は 2D 地図側のヒント・通知が使うため、状態チップは下中央にまとめる
+  // ---- 右中央: 表示中の色分けの凡例 ------------------------------------------------
+  const legend = createHudLegend(ctx);
+
+  // 上中央は 2D 地図側のヒント・通知が使うため、状態チップは下中央にまとめる。
+  // 四隅は地図の操作部品（2D）・視点リセット・倍率の注記・出典（3D）が使うので、凡例は右端の中央に置く
   el.replaceChildren(
     h('div', { class: 'hud-stack hud-tl' }, timeCard, shakeCard, warnCard, levelCard),
     h('div', { class: 'hud-stack hud-bc' }, placingChip, simChip, terrainChip, approxChip, cursorChip),
+    legend,
   );
 
   // ---- 時刻に連動する表示 ----------------------------------------------------------
@@ -106,9 +144,10 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
       setText(shakeText, `${strong ? '強い揺れ' : '揺れ'}（震度${SHINDO_LABEL[s.shindo]}）`);
     }
 
-    // 津波警報等（発表の目安 3 分）
+    // 津波警報等（近くの地震は気象庁の発表目標の約3分から。遠地津波の例は発表時刻を示さず、再生を始めたら表示）
     const warn = WARNING_INFO[sc.warning];
-    const showWarn = !!warn && t >= WARNING_ISSUE_SEC;
+    const showAt = warningShowSec(sc);
+    const showWarn = !!warn && (showAt !== null ? t >= showAt : sc.warning !== 'none' && (s.time.playing || t > 0));
     setHidden(warnCard, !showWarn);
 
     // 水位
@@ -139,7 +178,8 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
 
   // 警報の見た目（シナリオが変わった時のみ）
   ctx.scope.add(
-    store.select((s) => s.params.scenario.warning, (level) => {
+    store.select((s) => s.params.scenario, (sc) => {
+      const level = sc.warning;
       const w = WARNING_INFO[level];
       if (!w) return;
       const bg = isSafeColor(w.color) ? w.color : '#7e22ce';
@@ -148,9 +188,19 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
       warnCard.dataset.level = level;
       setText(warnLabel, `${w.label}（想定）`);
       setText(warnAction, w.action ?? '');
-      warnCard.title = [w.label, w.heightRange, w.action].filter(Boolean).join('\n');
       const issued = level === 'advisory' || level === 'warning' || level === 'major';
-      setText(warnSub, issued ? '発表の目安: 地震発生から約3分' : '');
+      let sub = '';
+      let note = '';
+      if (issued && isFarField(sc)) {
+        sub = '遠くの地震のため、発表の時刻はこの例では示していません';
+        note =
+          '遠くで起きた地震では、津波警報・注意報の発表までに時間がかかることがあります。この例で参考にした2025年7月30日の地震では、地震の13分後に津波注意報、76分後に津波警報に切り替えられました（気象庁）。この例は津波の到達を短縮しているため、発表の時刻は示していません。';
+      } else if (issued) {
+        sub = `気象庁の発表目標: 地震発生から${JMA_ISSUE_TARGET_LABEL}`;
+        note = JMA_ISSUE_TARGET_NOTE;
+      }
+      setText(warnSub, sub);
+      warnCard.title = [w.label, w.heightRange, w.action, note].filter(Boolean).join('\n');
     }, true),
   );
 
@@ -170,9 +220,11 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
       const running = sim.status === 'running';
       setHidden(simChip, !running);
       if (running) {
-        setText(simText, `計算中 ${formatPercent(sim.progress)}`);
+        // 計算側のメッセージ（例:「計算中… 地震発生から 12分（3並列）」）をそのまま出す
+        const msg = (sim.message ?? '').trim() || '計算中…';
+        setText(simText, `${msg} ${formatPercent(sim.progress)}`);
         simFill.style.width = formatPercent(sim.progress);
-        simChip.title = sim.message ?? '';
+        simChip.title = sim.auto ? `${msg}\n初めて開いたときの自動計算です。「地震・津波」タブで中止・条件の変更ができます。` : msg;
       }
     }, true),
   );
@@ -206,13 +258,131 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
     store.select((s) => s.cursor, (c) => {
       setHidden(cursorChip, !c);
       if (!c) return;
-      if (c.ground === null) {
-        setText(cursorText, '計算範囲外');
-        return;
-      }
-      const parts = [`地盤高 ${formatTP(c.ground)}`];
-      if (c.depth !== null) parts.push(c.depth >= 0.01 ? `浸水深 ${formatDepth(c.depth)}` : '浸水なし');
-      setText(cursorText, parts.join('　'));
+      setText(cursorText, describeCursor(c, store.get()));
     }, true),
   );
+}
+
+/** カーソル位置の説明（陸: 地盤高・浸水深、海・川: 水底の高さ・水深） */
+export function describeCursor(c: NonNullable<AppState['cursor']>, s: Pick<AppState, 'params'>): string {
+  if (c.ground === null) return '計算範囲外';
+  if (c.kind === 'sea') {
+    // 海・川の水底の高さは実測ではなく推定（地形データの注記を参照）
+    const parts = ['海・川', `水底 ${formatTP(c.ground)}（推定）`];
+    if (c.waterDepth !== undefined && Number.isFinite(c.waterDepth)) {
+      parts.push(c.waterDepth >= 0.01 ? `水深 ${formatDepth(c.waterDepth)}` : '引き波で水底が露出');
+    } else {
+      const still = s.params.tideTP - c.ground;
+      if (Number.isFinite(still) && still > 0) parts.push(`水深 ${formatDepth(still)}（地震前）`);
+    }
+    return parts.join('　');
+  }
+  const parts = [`地盤高 ${formatTP(c.ground)}`];
+  if (c.depth !== null) parts.push(c.depth >= 0.01 ? `浸水深 ${formatDepth(c.depth)}` : '浸水なし');
+  return parts.join('　');
+}
+
+// ---------------------------------------------------------------------------
+// 凡例（右中央）
+// ---------------------------------------------------------------------------
+
+function swatchRows(items: { label: string; color: string }[]): HTMLElement {
+  return h(
+    'ul',
+    { class: 'hud-legend-list' },
+    items.map((it) => h('li', null, h('span', { class: 'hud-swatch', style: { background: isSafeColor(it.color) ? it.color : 'transparent' }, 'aria-hidden': 'true' }), h('span', null, it.label))),
+  );
+}
+
+/**
+ * 表示中の色分けの凡例。公式の津波浸水想定（重ねるハザードマップ）と計算結果の浸水深は同じ配色
+ * （data/sources.ts の DEPTH_CLASSES）なので1つにまとめ、どちらを表示中かを見出しで示す。
+ */
+function createHudLegend(ctx: UIContext): HTMLElement {
+  const { store } = ctx;
+  const narrow = ctx.isMobile();
+  let collapsed = readLegendCollapsed(narrow);
+
+  const depthTitle = h('span', { class: 'hud-legend-title' });
+  const depthSub = h('span', { class: 'hud-legend-sub' });
+  const hazardNote = h('p', { class: 'hud-legend-note' }, '神奈川県（平成27年）・最大クラスの5地震の重ね合わせ。', HAZARD_PORTAL_NOTICE);
+  const seaRows = h(
+    'ul',
+    { class: 'hud-legend-list hud-legend-sea' },
+    h('li', null, h('span', { class: 'hud-swatch', style: { background: 'linear-gradient(90deg, #06b6d4, #e0faff)' }, 'aria-hidden': 'true' }), h('span', null, '海面の上昇')),
+    h('li', null, h('span', { class: 'hud-swatch', style: { background: 'linear-gradient(90deg, #4f7fd9, #0c1e48)' }, 'aria-hidden': 'true' }), h('span', null, '海面の低下（引き波）')),
+    h('li', null, h('span', { class: 'hud-swatch', style: { background: 'linear-gradient(90deg, #d6be8c, #846c46)' }, 'aria-hidden': 'true' }), h('span', null, '露出した海底')),
+  );
+  const depthBlock = h(
+    'div',
+    { class: 'hud-legend-block' },
+    h('div', { class: 'hud-legend-head' }, depthTitle, depthSub),
+    swatchRows(DEPTH_CLASSES.map((c) => ({ label: c.label, color: c.color }))),
+    seaRows,
+    hazardNote,
+  );
+  const arrivalBlock = h(
+    'div',
+    { class: 'hud-legend-block' },
+    h('div', { class: 'hud-legend-head' }, h('span', { class: 'hud-legend-title' }, '津波到達時間（計算）'), h('span', { class: 'hud-legend-sub' }, '地震発生から浸水が始まるまで')),
+    swatchRows(ARRIVAL_CLASSES.map((c) => ({ label: c.label, color: c.color }))),
+  );
+  const body = h('div', { class: 'hud-legend-body', id: 'hud-legend-body' }, arrivalBlock, depthBlock);
+  const toggleLabel = h('span', null, '凡例');
+  const chevron = h('span', { class: 'hud-legend-chev', 'aria-hidden': 'true' });
+  const toggle = h(
+    'button',
+    { type: 'button', class: 'hud-legend-toggle', 'aria-controls': 'hud-legend-body', 'aria-expanded': 'true' },
+    icon('layers', 14),
+    toggleLabel,
+    chevron,
+  );
+  const el = h('div', { class: 'hud-legend', role: 'region', 'aria-label': '地図の凡例', hidden: true }, toggle, body);
+
+  const applyCollapsed = () => {
+    el.classList.toggle('is-collapsed', collapsed);
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.title = collapsed ? '凡例を表示' : '凡例をたたむ';
+    chevron.replaceChildren(icon(collapsed ? 'chevronDown' : 'chevronUp', 14));
+    setHidden(body, collapsed);
+  };
+  toggle.addEventListener('click', () => {
+    collapsed = !collapsed;
+    writeLegendCollapsed(collapsed);
+    applyCollapsed();
+  });
+  applyCollapsed();
+
+  const render = () => {
+    const s = store.get();
+    const L = s.layers;
+    const out = !!s.sim.output;
+    const hazard = L.officialHazard;
+    const simDepth = out && (L.simFlood || L.maxDepth);
+    const arrival = out && L.arrival;
+    setHidden(el, !(hazard || simDepth || arrival));
+    setHidden(arrivalBlock, !arrival);
+    setHidden(depthBlock, !(hazard || simDepth));
+    setHidden(hazardNote, !hazard);
+    // 海の色分けは 2D 地図の「浸水（現在時刻）」レイヤーのもの（3D は水面として描く）
+    setHidden(seaRows, !(out && L.simFlood && s.view === '2d'));
+    if (hazard && simDepth) {
+      setText(depthTitle, '浸水深');
+      setText(depthSub, '公式の津波浸水想定と計算結果は同じ色分け');
+    } else if (hazard) {
+      setText(depthTitle, '津波浸水想定（公式）');
+      setText(depthSub, '浸水深（基準水位ではありません）');
+    } else if (L.maxDepth) {
+      setText(depthTitle, L.simFlood ? '浸水深（計算）' : '最大浸水深（計算）');
+      setText(depthSub, L.simFlood ? '現在時刻・最大とも同じ色分け' : '計算した時間内の最大');
+    } else {
+      setText(depthTitle, '浸水深（計算）');
+      setText(depthSub, 'タイムラインの時刻');
+    }
+    el.title = hazard ? `${HAZARD_TSUNAMI_TILES.label}\n${HAZARD_TSUNAMI_TILES.notes ?? ''}` : '';
+  };
+  ctx.scope.add(store.select((s) => s.layers, render, true));
+  ctx.scope.add(store.select((s) => s.sim.output, render));
+  ctx.scope.add(store.select((s) => s.view, render));
+  return el;
 }

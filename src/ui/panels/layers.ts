@@ -2,12 +2,13 @@
  * 「レイヤー」タブ: 背景地図、重ねる情報の切り替え、3D の鉛直強調。
  */
 import type { Basemap, LayerState } from '../../core/types';
-import { BASEMAPS, HAZARD_TSUNAMI_TILES } from '../../data/sources';
+import { BASEMAPS, HAZARD_PORTAL_NOTICE, HAZARD_TSUNAMI_TILES } from '../../data/sources';
 import type { UIContext } from '../context';
 import { h, safeAttributionHTML, setHidden } from '../dom';
 import { radioField, sliderField, switchField } from '../fields';
 import { icon } from '../icons';
 import { arrivalLegend, depthLegend } from '../legends';
+import { sheltersInfoLine } from '../shelterInfo';
 
 export function createLayersPanel(ctx: UIContext): HTMLElement {
   const { actions, store } = ctx;
@@ -34,16 +35,20 @@ export function createLayersPanel(ctx: UIContext): HTMLElement {
     get: (s) => Math.round(s.layers.officialHazardOpacity * 100),
     commit: (v) => actions.setLayer('officialHazardOpacity', v / 100),
   });
+  // 公式の津波浸水想定の説明（表示の有無にかかわらず常に出す）
+  const hazardAbout = h(
+    'div',
+    { class: 'hazard-about' },
+    h('p', { class: 'hazard-notice' }, icon('alert', 14), h('span', null, HAZARD_PORTAL_NOTICE)),
+    HAZARD_TSUNAMI_TILES.notes ? h('p', { class: 'field-hint' }, HAZARD_TSUNAMI_TILES.notes) : null,
+    h('p', { class: 'source-note' }, '出典: ', safeAttributionHTML(HAZARD_TSUNAMI_TILES.attribution)),
+  );
+  // 表示中のみ: 不透明度と凡例
   const hazardExtra = h(
     'div',
     { class: 'switch-extra' },
     opacity,
-    h('p', { class: 'source-note' }, '出典: ', safeAttributionHTML(HAZARD_TSUNAMI_TILES.attribution)),
-    h(
-      'p',
-      { class: 'field-hint' },
-      '都道府県が公表した「津波浸水想定」（最大クラスの津波を想定）を表示します。このサイトの計算結果と見比べてください。',
-    ),
+    depthLegend('浸水深（公式の津波浸水想定。このサイトの計算結果と同じ色分け）'),
   );
   ctx.scope.add(store.select((s) => s.layers.officialHazard, (on) => setHidden(hazardExtra, !on), true));
 
@@ -79,8 +84,9 @@ export function createLayersPanel(ctx: UIContext): HTMLElement {
       h(
         'div',
         { class: 'switch-list' },
-        layer('officialHazard', '公式ハザードマップ（津波浸水想定）', 'ハザードマップポータルサイトの配信データ', hazardExtra),
-        layer('shelters', '避難場所', '指定緊急避難場所（津波）など'),
+        layer('officialHazard', '公式ハザードマップ（津波浸水想定）', '神奈川県の津波浸水想定（ハザードマップポータルサイトの配信データ）', hazardExtra),
+        hazardAbout,
+        layer('shelters', '避難場所', '指定緊急避難場所（津波）など', sheltersInfoLine(ctx, 'データ')),
         layer('elevation', '色別標高', '土地の高さを色で表示'),
         layer('buildings', '建物（3D）', '3D表示で建物を立体的に表示'),
       ),
