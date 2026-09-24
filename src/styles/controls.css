@@ -1,0 +1,648 @@
+/* ボタン・入力・進捗・注意書きなどの共通部品 */
+
+/* ---- ボタン ---------------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-s);
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 2px rgb(3 105 161 / 0.35), inset 0 1px 0 rgb(255 255 255 / 0.12);
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  color: #fff;
+}
+
+.btn-primary:active {
+  background: var(--ocean-800);
+}
+
+.btn-secondary {
+  background: var(--surface);
+  color: var(--navy-900);
+  border-color: var(--border-strong);
+}
+
+.btn-secondary:hover {
+  background: var(--surface-2);
+  border-color: var(--navy-600);
+  color: var(--navy-900);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--ocean-700);
+}
+
+.btn-ghost:hover {
+  background: var(--ocean-50);
+}
+
+.btn-danger-text {
+  color: var(--danger);
+}
+
+.btn-danger-text:hover {
+  background: var(--danger-bg);
+}
+
+.btn-sm {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+.btn-lg {
+  height: 48px;
+  padding: 0 20px;
+  font-size: 15px;
+  border-radius: var(--radius);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-2);
+}
+
+.icon-btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.icon-btn .icon {
+  transition: transform var(--dur) var(--ease);
+}
+
+/* ---- 入力 ------------------------------------------------------------------ */
+.field {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.field + .field,
+.field + .btn,
+.field + .source-note {
+  margin-top: var(--sp-3);
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.field-label {
+  padding: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.field-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.unit {
+  min-width: 1.5em;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+.field-hint,
+.field-desc {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.field-desc {
+  color: var(--text-2);
+}
+
+.num-input {
+  width: 76px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  font-family: var(--font-num);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.num-input:hover,
+.select:hover,
+.name-input:hover {
+  border-color: var(--navy-600);
+}
+
+.num-input:focus,
+.select:focus,
+.name-input:focus {
+  border-color: var(--focus);
+  outline: 2px solid rgb(29 127 214 / 0.25);
+  outline-offset: 0;
+}
+
+.select {
+  height: 34px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 30px 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23354357' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6.5 9.5l5.5 5.5 5.5-5.5'/%3E%3C/svg%3E") no-repeat right 8px center / 16px;
+  font-size: 13px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.select-sm {
+  height: 30px;
+  font-size: 12.5px;
+}
+
+/* スライダー（--fill で塗りの位置を表す） */
+.range {
+  --fill: 50%;
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+.range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 6px;
+  background: linear-gradient(to right, var(--accent) var(--fill), var(--surface-3) var(--fill));
+  box-shadow: inset 0 0 0 1px rgb(15 27 45 / 0.06);
+}
+
+.range::-moz-range-track {
+  height: 6px;
+  border-radius: 6px;
+  background: linear-gradient(to right, var(--accent) var(--fill), var(--surface-3) var(--fill));
+}
+
+.range::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: var(--shadow-1);
+  -webkit-appearance: none;
+  appearance: none;
+  transition: transform var(--dur) var(--ease);
+}
+
+.range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: #fff;
+}
+
+.range:hover::-webkit-slider-thumb {
+  transform: scale(1.1);
+}
+
+.range:focus-visible {
+  outline: none;
+}
+
+.range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px rgb(29 127 214 / 0.3);
+}
+
+.range:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 4px rgb(29 127 214 / 0.3);
+}
+
+/* セグメント（ラジオ） */
+.fieldset > legend {
+  float: left;
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.fieldset > legend + * {
+  clear: both;
+}
+
+.segmented {
+  display: flex;
+  padding: 3px;
+  gap: 3px;
+  border-radius: var(--radius-s);
+  background: var(--surface-3);
+}
+
+.segmented-item {
+  position: relative;
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-2);
+  text-align: center;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.segmented-item:hover {
+  color: var(--text);
+}
+
+.segmented-item:has(input:checked) {
+  background: var(--surface);
+  color: var(--navy-900);
+  box-shadow: var(--shadow-1);
+}
+
+.segmented-item:has(input:focus-visible),
+.radio-card:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* ラジオカード */
+.radio-cards {
+  display: grid;
+  gap: 6px;
+}
+
+.radio-card {
+  position: relative;
+  display: grid;
+  gap: 2px;
+  padding: 8px 12px 8px 36px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.radio-card::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  top: 11px;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-strong);
+  border-radius: 50%;
+  background: #fff;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+
+.radio-card:hover {
+  border-color: var(--navy-600);
+}
+
+.radio-card:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--ocean-50);
+}
+
+.radio-card:has(input:checked)::before {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3px #fff, inset 0 0 0 8px var(--accent);
+}
+
+.radio-label {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.radio-sub {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* スイッチ */
+.switch-list {
+  display: grid;
+  gap: 2px;
+}
+
+.switch-field + .switch-field {
+  border-top: 1px solid var(--surface-3);
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 10px 0;
+  cursor: pointer;
+}
+
+.switch-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.switch-label {
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.switch-hint {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.switch-input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.switch-track {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  border-radius: 24px;
+  background: var(--border-strong);
+  transition: background var(--dur) var(--ease);
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+  transition: transform var(--dur) var(--ease);
+}
+
+.switch-input:checked + .switch-track {
+  background: var(--accent);
+}
+
+.switch-input:checked + .switch-track .switch-thumb {
+  transform: translateX(16px);
+}
+
+.switch-input:focus-visible + .switch-track {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.switch-extra {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--radius-s);
+  background: var(--surface-2);
+}
+
+/* ---- 進捗 ------------------------------------------------------------------ */
+.progress {
+  position: relative;
+  display: block;
+  height: 8px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+}
+
+.progress-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--ocean-500), var(--ocean-700));
+  transition: width 240ms var(--ease);
+}
+
+.spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  opacity: 0.8;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- 注意書き・タグ ---------------------------------------------------------- */
+.callout {
+  display: grid;
+  gap: 6px;
+  padding: var(--sp-3);
+  border: 1px solid var(--info-border);
+  border-left-width: 4px;
+  border-radius: var(--radius-s);
+  background: var(--info-bg);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.callout.compact {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: 12.5px;
+}
+
+.callout.compact .icon {
+  margin-top: 2px;
+}
+
+.callout-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-weight: 700;
+  color: var(--navy-900);
+}
+
+.callout-info {
+  border-color: var(--info-border);
+  border-left-color: var(--accent);
+}
+
+.callout-info .callout-title .icon {
+  color: var(--accent);
+}
+
+.callout-warning {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  border-left-color: var(--warn-strong);
+  color: #3f2a06;
+}
+
+.callout-warning .icon {
+  color: var(--warn-strong);
+}
+
+.callout-warning .callout-title {
+  color: var(--warn);
+}
+
+.callout-danger {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  border-left-color: var(--danger);
+  color: #3d0d09;
+}
+
+.callout-danger .icon,
+.callout-danger .callout-title {
+  color: var(--danger);
+}
+
+.callout-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: 2px;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.tag-official {
+  background: var(--ok-bg);
+  border-color: var(--ok-border);
+  color: var(--ok);
+}
+
+.tag-example {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  color: var(--warn);
+}
+
+.tag-modified {
+  background: var(--ocean-100);
+  color: var(--ocean-800);
+}
+
+.tag-running {
+  background: var(--ocean-100);
+  color: var(--ocean-800);
+}
+
+.count-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.source-note {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.source-note a {
+  color: var(--text-2);
+}
+
+details.notes {
+  font-size: 12.5px;
+}
+
+details.notes > summary {
+  cursor: pointer;
+  color: var(--ocean-700);
+  font-weight: 700;
+  font-size: 12.5px;
+}
+
+details.notes ul {
+  margin-top: 4px;
+  padding-left: 1.2em;
+  color: var(--text-2);
+}
+
+details.notes p {
+  margin-top: 4px;
+}

@@ -1,0 +1,276 @@
+/**
+ * タイムライン: 再生・一時停止、再生速度、時刻スクラバー（計算済み範囲・目印つき）、水位のスパークライン。
+ */
+import { SPEED_OPTIONS } from '../core/controller';
+import type { AppState } from '../core/types';
+import { WARNING_INFO } from '../data/warnings';
+import { safeCall, timelineDuration, type UIContext } from './context';
+import { h, s as svg, setAttr, setHidden, setText, uid } from './dom';
+import { clamp, formatClock, formatElapsed, formatTP } from './format';
+import { icon } from './icons';
+import { WARNING_ISSUE_SEC } from './hud';
+import { interpolateSeries, linePath, seriesExtent } from './series';
+
+const SPARK_W = 1000;
+const SPARK_H = 40;
+
+interface Marker {
+  id: 'shake' | 'warn' | 'arrival' | 'flood';
+  label: string;
+  color: string;
+  t: number;
+}
+
+export function mountTimeline(el: HTMLElement, ctx: UIContext): void {
+  const { store, actions } = ctx;
+
+  // ---- 再生ボタン・速度 -------------------------------------------------------------
+  const playIcon = h('span', { class: 'tl-play-icon' }, icon('play', 22));
+  const playBtn = h('button', { type: 'button', class: 'tl-play', 'aria-label': '再生', onclick: () => actions.togglePlay() }, playIcon);
+  const speedId = uid('speed');
+  const speedSel = h(
+    'select',
+    { id: speedId, class: 'select select-sm tl-speed-select', title: '再生速度（実時間1秒あたりに進むシミュレーション時間）' },
+    SPEED_OPTIONS.map((v) => h('option', { value: String(v) }, `${v}倍`)),
+  );
+  speedSel.addEventListener('change', () => actions.setSpeed(Number(speedSel.value)));
+
+  // ---- スパークライン -------------------------------------------------------------------
+  const sparkZero = svg('line', { class: 'spark-zero', x1: 0, x2: SPARK_W, 'vector-effect': 'non-scaling-stroke' });
+  const sparkPath = svg('path', { class: 'spark-line', 'vector-effect': 'non-scaling-stroke' });
+  const sparkSvg = svg('svg', { class: 'spark-svg', viewBox: `0 0 ${SPARK_W} ${SPARK_H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' }, sparkZero, sparkPath);
+  const sparkMax = h('span', { class: 'spark-max' });
+  const sparkEmpty = h('span', { class: 'spark-empty' }, 'シミュレーションを実行すると、鵠沼海岸沖の水位の変化がここに表示されます');
+  const playhead = h('span', { class: 'tl-playhead', 'aria-hidden': 'true' });
+  const hoverLine = h('span', { class: 'tl-hover-line', 'aria-hidden': 'true', hidden: true });
+  const tooltip = h('span', { class: 'tl-tooltip', 'aria-hidden': 'true', hidden: true });
+  const spark = h('div', { class: 'tl-spark' }, sparkSvg, h('span', { class: 'spark-label' }, '鵠沼海岸沖の水位（計算）'), sparkMax, sparkEmpty);
+
+  // ---- スクラバー -----------------------------------------------------------------------
+  const buffer = h('span', { class: 'tl-buffer' });
+  const played = h('span', { class: 'tl-played' });
+  const markerLayer = h('span', { class: 'tl-marker-layer' });
+  const rail = h('span', { class: 'tl-rail', 'aria-hidden': 'true' }, buffer, played, markerLayer);
+  const range = h('input', { type: 'range', class: 'tl-range', min: 0, max: 3600, step: 1, value: 0, 'aria-label': '地震発生からの時刻' });
+  const track = h('div', { class: 'tl-track' }, rail, range);
+  const chips = h('div', { class: 'tl-chips' });
+  const main = h('div', { class: 'tl-main' }, spark, track, chips, playhead, hoverLine, tooltip);
+
+  // ---- 時刻表示 -------------------------------------------------------------------------
+  const nowEl = h('span', { class: 'tl-now' }, '0:00');
+  const durEl = h('span', { class: 'tl-dur' }, '/ 60:00');
+  const waitEl = h('span', { class: 'tl-wait', hidden: true }, '計算待ち…');
+
+  el.replaceChildren(
+    h('div', { class: 'tl-controls' }, playBtn, h('label', { class: 'visually-hidden', for: speedId }, '再生速度'), speedSel),
+    main,
+    h('div', { class: 'tl-time' }, h('span', { class: 'tl-time-row' }, nowEl, durEl), waitEl),
+  );
+  el.setAttribute('aria-label', 'タイムライン');
+
+  // ---- 状態 ---------------------------------------------------------------------------
+  let duration = timelineDuration(store.get());
+  let wasPlaying = false;
+  let scrubbing = false;
+
+  const limitT = (s: AppState) => {
+    const out = s.sim.output;
+    const d = timelineDuration(s);
+    return out ? Math.min(d, Math.max(0, ctx.watcher.snap.timeReady || safeCall(() => out.timeReady(), 0))) : d;
+  };
+  const seek = (t: number) => {
+    const s = store.get();
+    actions.seek(clamp(t, 0, limitT(s)));
+  };
+
+  // 毎フレーム: 位置とラベルだけ更新
+  let lastSec = -1;
+  const renderTime = () => {
+    const s = store.get();
+    const t = s.time.t;
+    const p = duration > 0 ? clamp(t / duration, 0, 1) : 0;
+    played.style.transform = `scaleX(${p})`;
+    playhead.style.left = `${p * 100}%`;
+    if (!scrubbing) range.value = String(Math.round(t));
+    const sec = Math.floor(t);
+    if (sec !== lastSec) {
+      lastSec = sec;
+      setText(nowEl, formatClock(t));
+      range.setAttribute('aria-valuetext', `地震発生から${formatElapsed(t)}`);
+    }
+    const out = s.sim.output;
+    const tr = ctx.watcher.snap.timeReady;
+    setHidden(waitEl, !(s.time.playing && out && s.sim.status === 'running' && tr < duration && t >= tr - 0.5));
+  };
+
+  const renderDuration = () => {
+    const s = store.get();
+    duration = timelineDuration(s);
+    range.max = String(Math.round(duration));
+    setText(durEl, `/ ${formatClock(duration)}`);
+    renderBuffer();
+    renderMarkers();
+    renderSpark();
+    lastSec = -1;
+    renderTime();
+  };
+
+  const renderBuffer = () => {
+    const out = store.get().sim.output;
+    const tr = out ? ctx.watcher.snap.timeReady : 0;
+    buffer.style.transform = `scaleX(${duration > 0 ? clamp(tr / duration, 0, 1) : 0})`;
+    setHidden(buffer, !out);
+  };
+
+  // ---- 目印 -----------------------------------------------------------------------------
+  const renderMarkers = () => {
+    const s = store.get();
+    const sc = s.params.scenario;
+    const list: Marker[] = [];
+    if (sc.shakingSec > 0) list.push({ id: 'shake', label: '揺れ終了', color: '#64748b', t: sc.shakingSec });
+    const w = WARNING_INFO[sc.warning];
+    if (w && sc.warning !== 'none') list.push({ id: 'warn', label: `${w.label}の目安`, color: '#7e22ce', t: WARNING_ISSUE_SEC });
+    list.push({ id: 'arrival', label: '想定到達時刻', color: '#d97706', t: sc.arrivalMin * 60 });
+    const first = ctx.watcher.snap.output ? ctx.watcher.snap.summary?.firstArrival : undefined;
+    if (first !== undefined && Number.isFinite(first)) list.push({ id: 'flood', label: '最初の浸水（計算）', color: '#dc2626', t: first });
+
+    const visible = list.filter((m) => m.t >= 0 && m.t <= duration);
+    markerLayer.replaceChildren(
+      ...visible.map((m) => h('span', { class: 'tl-marker', dataset: { id: m.id }, style: { left: `${(m.t / duration) * 100}%`, '--mk': m.color }, title: `${m.label} ${formatClock(m.t)}` })),
+    );
+    chips.replaceChildren(
+      ...visible.map((m) =>
+        h(
+          'button',
+          { type: 'button', class: 'tl-chip', style: { '--mk': m.color }, title: `${m.label}（地震発生から${formatElapsed(m.t)}）へ移動`, onclick: () => seek(m.t) },
+          h('span', { class: 'tl-chip-dot', 'aria-hidden': 'true' }),
+          h('span', null, m.label),
+          h('span', { class: 'tl-chip-time' }, formatClock(m.t)),
+        ),
+      ),
+    );
+  };
+
+  // ---- スパークライン --------------------------------------------------------------------
+  const renderSpark = () => {
+    const s = store.get();
+    const out = s.sim.output;
+    const n = out ? safeCall(() => out.gauge.count(), 0) : 0;
+    setHidden(sparkEmpty, n > 1);
+    setHidden(sparkMax, n < 2);
+    if (!out || n < 2) {
+      sparkPath.setAttribute('d', '');
+      setHidden(sparkZero, true);
+      return;
+    }
+    const g = out.gauge;
+    const ext = seriesExtent(g.eta, n);
+    const base = s.params.tideTP;
+    const lo = Math.min(ext?.min ?? base, base) - 0.3;
+    const hi = Math.max(ext?.max ?? base, base) + 0.3;
+    sparkPath.setAttribute('d', linePath(g.t, g.eta, n, { t0: 0, t1: duration, yMin: lo, yMax: hi, width: SPARK_W, height: SPARK_H, maxPoints: 800 }));
+    const y0 = SPARK_H - ((base - lo) / (hi - lo)) * SPARK_H;
+    setAttr(sparkZero, 'y1', y0.toFixed(1));
+    setAttr(sparkZero, 'y2', y0.toFixed(1));
+    setHidden(sparkZero, false);
+    setText(sparkMax, ext ? `最大 ${formatTP(ext.max)}` : '');
+  };
+
+  // ---- ホバー（時刻と水位のツールチップ） ------------------------------------------------
+  const onHover = (e: PointerEvent) => {
+    const rect = track.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const p = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+    const t = p * duration;
+    const out = store.get().sim.output;
+    let text = formatClock(t);
+    if (out) {
+      const n = safeCall(() => out.gauge.count(), 0);
+      const eta = interpolateSeries(out.gauge.t, out.gauge.eta, n, t);
+      if (Number.isFinite(eta)) text += `　水位 ${formatTP(eta)}`;
+      else if (t > ctx.watcher.snap.timeReady) text += '　未計算';
+    }
+    setText(tooltip, text);
+    const mainRect = main.getBoundingClientRect();
+    const x = e.clientX - mainRect.left;
+    hoverLine.style.left = `${x}px`;
+    tooltip.style.left = `${clamp(x, 60, mainRect.width - 60)}px`;
+    setHidden(hoverLine, false);
+    setHidden(tooltip, false);
+  };
+  const hideHover = () => {
+    setHidden(hoverLine, true);
+    setHidden(tooltip, true);
+  };
+  main.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'mouse') onHover(e);
+  });
+  main.addEventListener('pointerleave', hideHover);
+  // スパークライン部分のクリックでもその時刻へ
+  spark.addEventListener('click', (e) => {
+    const rect = track.getBoundingClientRect();
+    if (rect.width > 0) seek(((e.clientX - rect.left) / rect.width) * duration);
+  });
+
+  // ---- スクラバー操作 --------------------------------------------------------------------
+  range.addEventListener('pointerdown', () => {
+    scrubbing = true;
+    wasPlaying = store.get().time.playing;
+    if (wasPlaying) actions.pause();
+  });
+  const endScrub = () => {
+    if (!scrubbing) return;
+    scrubbing = false;
+    seek(Number(range.value));
+    if (wasPlaying) actions.play();
+    wasPlaying = false;
+  };
+  range.addEventListener('input', () => {
+    const lim = limitT(store.get());
+    if (Number(range.value) > lim) range.value = String(Math.floor(lim));
+    seek(Number(range.value));
+  });
+  range.addEventListener('change', endScrub);
+  range.addEventListener('pointerup', endScrub);
+  range.addEventListener('pointercancel', endScrub);
+  range.addEventListener('keydown', (e) => {
+    const t = store.get().time.t;
+    const big = e.shiftKey ? 60 : 10;
+    let handled = true;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') seek(t + big);
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') seek(t - big);
+    else if (e.key === 'PageUp') seek(t + 60);
+    else if (e.key === 'PageDown') seek(t - 60);
+    else if (e.key === 'Home') seek(0);
+    else if (e.key === 'End') seek(duration);
+    else if (e.key === ' ') actions.togglePlay();
+    else handled = false;
+    if (handled) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
+
+  // ---- 購読 -----------------------------------------------------------------------------
+  ctx.scope.add(store.select((s) => s.time.t, renderTime, true));
+  ctx.scope.add(
+    store.select((s) => s.time.playing, (playing) => {
+      playIcon.replaceChildren(icon(playing ? 'pause' : 'play', 22));
+      playBtn.setAttribute('aria-label', playing ? '一時停止' : '再生');
+      playBtn.classList.toggle('is-playing', playing);
+      renderTime();
+    }, true),
+  );
+  ctx.scope.add(store.select((s) => s.time.speed, (v) => (speedSel.value = String(v)), true));
+  ctx.scope.add(store.select(timelineDuration, renderDuration, true));
+  ctx.scope.add(store.select((s) => s.params.scenario, renderMarkers));
+  ctx.scope.add(store.select((s) => s.params.tideTP, renderSpark));
+  ctx.scope.add(
+    ctx.watcher.subscribe(() => {
+      renderBuffer();
+      renderMarkers();
+      renderSpark();
+      renderTime();
+    }),
+  );
+}

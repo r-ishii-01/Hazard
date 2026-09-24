@@ -1,1 +1,14 @@
-/* styles: ui 担当が実装 */
+/*
+ * 鵠沼海岸 津波シミュレーター — スタイルの入口（src/main.ts から読み込む）。
+ * 深い紺のヘッダー、海の青のアクセント、高コントラストの落ち着いた防災情報の見た目。
+ */
+@import "./tokens.css";
+@import "./base.css";
+@import "./layout.css";
+@import "./header.css";
+@import "./sidebar.css";
+@import "./controls.css";
+@import "./panels.css";
+@import "./hud.css";
+@import "./timeline.css";
+@import "./modal.css";

@@ -1,0 +1,80 @@
+/* デザイントークン（色・余白・角丸・影・寸法）。8px グリッドを基本にする。 */
+:root {
+  --font-ja: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", Meiryo, sans-serif;
+  --font-num: "SF Mono", "Roboto Mono", "Noto Sans Mono", Menlo, Consolas, var(--font-ja);
+
+  /* 濃紺（ヘッダー・HUD） */
+  --navy-950: #061426;
+  --navy-900: #0b1f3a;
+  --navy-800: #122a4c;
+  --navy-700: #1b3a63;
+  --navy-600: #2a4d7c;
+
+  /* 海のアクセント */
+  --ocean-800: #0b4f75;
+  --ocean-700: #075985;
+  --ocean-600: #0369a1;
+  --ocean-500: #0284c7;
+  --ocean-400: #38bdf8;
+  --ocean-200: #bae3f7;
+  --ocean-100: #e0f2fe;
+  --ocean-50: #f0f8fe;
+
+  /* 面と文字（白地で 4.5:1 以上） */
+  --surface: #ffffff;
+  --surface-2: #f5f7fa;
+  --surface-3: #eaeef3;
+  --border: #d6dde6;
+  --border-strong: #b4c0ce;
+  --text: #0f1b2d;
+  --text-2: #354357;
+  --text-3: #556275;
+  --stage-bg: #dfe6ee;
+
+  /* 状態色 */
+  --danger: #b42318;
+  --danger-strong: #8f1a12;
+  --danger-bg: #fdf1f0;
+  --danger-border: #f1b4ae;
+  --warn: #8a4b08;
+  --warn-strong: #b45309;
+  --warn-bg: #fff8e8;
+  --warn-border: #f2c46d;
+  --ok: #166534;
+  --ok-bg: #edf8f1;
+  --ok-border: #a6d8b8;
+  --info-bg: var(--ocean-50);
+  --info-border: var(--ocean-200);
+
+  --accent: var(--ocean-600);
+  --accent-hover: var(--ocean-700);
+  --focus: #1d7fd6;
+
+  /* 余白（8px グリッド） */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  --radius-s: 6px;
+  --radius: 10px;
+  --radius-l: 14px;
+  --radius-pill: 999px;
+
+  --shadow-1: 0 1px 2px rgb(15 27 45 / 0.08), 0 1px 3px rgb(15 27 45 / 0.06);
+  --shadow-2: 0 4px 14px rgb(15 27 45 / 0.12), 0 2px 4px rgb(15 27 45 / 0.08);
+  --shadow-3: 0 18px 48px rgb(6 20 38 / 0.32), 0 4px 12px rgb(6 20 38 / 0.18);
+  --shadow-hud: 0 6px 18px rgb(6 20 38 / 0.28), 0 1px 3px rgb(6 20 38 / 0.24);
+
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur: 160ms;
+
+  /* 寸法 */
+  --header-h: 56px;
+  --sidebar-w: 360px;
+  --timeline-h: 96px;
+  --tabbar-h: 56px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}

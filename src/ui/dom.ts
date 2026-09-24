@@ -93,7 +93,9 @@ export function setHidden(el: HTMLElement | SVGElement, hidden: boolean): void {
   if (el instanceof HTMLElement) {
     if (el.hidden !== hidden) el.hidden = hidden;
   } else {
-    setAttr(el, 'display', hidden ? 'none' : null);
+    // SVG は CSS の display 指定が属性より優先されるため style で切り替える
+    const v = hidden ? 'none' : '';
+    if (el.style.display !== v) el.style.display = v;
   }
 }
 

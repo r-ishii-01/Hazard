@@ -1,0 +1,91 @@
+/* 「ご利用にあたって」モーダル */
+dialog.modal {
+  width: min(600px, calc(100% - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-l);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-3);
+  overflow: auto;
+}
+
+dialog.modal[open] {
+  animation: modal-in 220ms var(--ease);
+}
+
+dialog.modal::backdrop {
+  background: rgb(6 20 38 / 0.62);
+  backdrop-filter: blur(2px);
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+.modal-card {
+  display: grid;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  background: linear-gradient(100deg, var(--navy-950), var(--navy-800));
+  color: #fff;
+}
+
+.modal-head h2 {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.modal-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgb(255 255 255 / 0.12);
+}
+
+.modal-card > .disclaimer-body {
+  padding: var(--sp-5);
+}
+
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-5);
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.modal-foot .btn {
+  height: 44px;
+}
+
+@media (max-width: 819.98px) {
+  .modal-head,
+  .modal-card > .disclaimer-body,
+  .modal-foot {
+    padding-left: var(--sp-4);
+    padding-right: var(--sp-4);
+  }
+
+  .modal-foot {
+    flex-direction: column-reverse;
+  }
+
+  .modal-foot .btn {
+    width: 100%;
+  }
+}

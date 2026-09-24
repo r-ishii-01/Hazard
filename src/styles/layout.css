@@ -1,0 +1,100 @@
+/* 画面全体のレイアウト: ヘッダー / サイドバー / ステージ（地図） / タイムライン */
+#app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  grid-template-rows: var(--header-h) minmax(0, 1fr) var(--timeline-h);
+  grid-template-areas:
+    "header header"
+    "sidebar stage"
+    "sidebar timeline";
+  height: 100vh;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+}
+
+#app-header {
+  grid-area: header;
+  min-width: 0;
+  z-index: 40;
+}
+
+#sidebar {
+  grid-area: sidebar;
+  min-height: 0;
+  min-width: 0;
+  z-index: 20;
+}
+
+#stage {
+  grid-area: stage;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--stage-bg);
+  isolation: isolate;
+}
+
+#timeline {
+  grid-area: timeline;
+  min-width: 0;
+  z-index: 15;
+}
+
+/* 2D / 3D ビュー: どちらも #stage いっぱいに重ね、アクティブな方だけ見せる（body[data-view] は main.ts が設定） */
+#stage > .view {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 50%;
+}
+
+#view-2d {
+  z-index: 1;
+}
+
+#view-3d {
+  z-index: 2;
+}
+
+body[data-view="2d"] #view-3d,
+body[data-view="3d"] #view-2d,
+body:not([data-view]) #view-3d {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+#stage.is-shaking > .view {
+  will-change: transform;
+}
+
+#hud {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------------------- */
+/* モバイル（< 820px）: ステージを上、タイムラインをその下、タブバーを最下部に。     */
+/* パネルはタブバーの上に開くボトムシート（sidebar.css）。                        */
+/* ------------------------------------------------------------------------- */
+@media (max-width: 819.98px) {
+  :root {
+    --header-h: 48px;
+  }
+
+  #app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: var(--header-h) minmax(0, 1fr) auto calc(var(--tabbar-h) + var(--safe-bottom));
+    grid-template-areas:
+      "header"
+      "stage"
+      "timeline"
+      "sidebar";
+  }
+
+  #sidebar {
+    z-index: 30;
+  }
+}

@@ -171,7 +171,7 @@ export function summarizeArrays(arrival: ArrayLike<number>, maxDepth: ArrayLike<
 
 /**
  * people モジュールが公開する浸水深の閾値（形式は未確定）を、昇順の数値配列に正規化する。
- * 受け付ける形: number[] / { key: number } / [{ depth|min|value|threshold: number }]
+ * 受け付ける形: number[] / { key: number } / [{ minDepth|depth|min|value|threshold: number }]
  */
 export function normalizeThresholds(raw: unknown): number[] {
   const out: number[] = [];
@@ -180,7 +180,7 @@ export function normalizeThresholds(raw: unknown): number[] {
       if (Number.isFinite(v) && v > 0) out.push(v);
     } else if (v && typeof v === 'object') {
       const o = v as Record<string, unknown>;
-      for (const key of ['depth', 'min', 'value', 'threshold', 'm']) {
+      for (const key of ['minDepth', 'depth', 'min', 'value', 'threshold', 'm']) {
         if (typeof o[key] === 'number') {
           pick(o[key]);
           return;

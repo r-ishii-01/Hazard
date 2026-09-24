@@ -1,0 +1,183 @@
+import { describe, expect, it } from 'vitest';
+import type { QuakeScenario, SimParams, TerrainGrid } from '../src/core/types';
+import { runEngine, type CalibrationInfo, type EngineStartInfo, type StatsSnapshot } from '../src/sim/engine';
+import { makeKugenumaLikeGrid } from '../src/sim/synthetic';
+
+function scenario(p: Partial<QuakeScenario>): QuakeScenario {
+  return {
+    id: 'test',
+    name: 'テスト用',
+    shortName: 'テスト',
+    magnitude: null,
+    shindo: '6-',
+    coastHeight: 5,
+    arrivalMin: 10,
+    periodMin: 8,
+    firstMotion: 'rise',
+    waves: 2,
+    shakingSec: 60,
+    warning: 'warning',
+    description: '',
+    isOfficial: false,
+    ...p,
+  };
+}
+
+/** 鵠沼海岸に似せた小さな合成地形（一定水深の棚＋砂浜＋平地、約 31 m 格子） */
+function coast(): TerrainGrid {
+  return makeKugenumaLikeGrid({
+    resolution: 'coarse',
+    bounds: { west: 139.445, east: 139.495, south: 35.297, north: 35.322 },
+    shelfDepth: 12,
+    duneHeight: 0,
+    plainHeight: 3,
+    island: false,
+    rivers: false,
+  });
+}
+
+function run(grid: TerrainGrid, params: SimParams) {
+  let info: EngineStartInfo | null = null;
+  let cal: CalibrationInfo | null = null;
+  let stats: StatsSnapshot | null = null;
+  const frames: (Uint16Array | null)[] = [];
+  const gaugeT: number[] = [];
+  const gaugeEta: number[] = [];
+  const progress: number[] = [];
+  const perf = runEngine(
+    { spec: grid.spec, z: grid.z, kind: grid.kind, manning: grid.manning, params },
+    {
+      start: (i) => (info = i),
+      frame: (index, data, gt, ge) => {
+        expect(index).toBe(frames.length);
+        frames.push(data);
+        gaugeT.push(...gt);
+        gaugeEta.push(...ge);
+      },
+      calibrated: (c) => (cal = c),
+      stats: (s) => (stats = s),
+      progress: (p, msg) => {
+        expect(typeof msg).toBe('string');
+        progress.push(p);
+      },
+    },
+  );
+  return { info: info!, cal: cal!, stats: stats! as StatsSnapshot, frames, gaugeT, gaugeEta, progress, perf };
+}
+
+const params = (sc: QuakeScenario, p: Partial<SimParams> = {}): SimParams => ({
+  scenario: sc,
+  tideTP: 0,
+  durationMin: 30,
+  resolution: 'coarse',
+  landManning: 0.06,
+  ...p,
+});
+
+describe('エンジン: 校正と出力', () => {
+  const grid = coast();
+
+  it('海岸の最大水位が目標 coastHeight の ±15% 以内になり、第1波の山が到達時間に届く', () => {
+    const sc = scenario({ coastHeight: 5, arrivalMin: 10 });
+    const r = run(grid, params(sc));
+    expect(r.info.segment.rule).toBe('kugenuma');
+    expect(r.info.segment.cells).toBeGreaterThan(20);
+    expect(r.cal.boundaryAmplitude).toBeGreaterThan(0);
+    expect(r.cal.trials.length).toBeGreaterThanOrEqual(1);
+    expect(Math.abs(r.stats.achievedCoastMax - 5) / 5).toBeLessThan(0.15);
+    expect(r.stats.final).toBe(true);
+    // 入力開始時刻は到達時間から逆算される
+    expect(r.cal.boundaryStartSec).toBeGreaterThan(0);
+    expect(r.cal.expectedCrestSec).toBeCloseTo(600, 0);
+    // 潮位計の最大は到達時間の前後（±3分）
+    let iMax = 0;
+    r.gaugeEta.forEach((v, i) => {
+      if (v > r.gaugeEta[iMax]) iMax = i;
+    });
+    expect(Math.abs(r.gaugeT[iMax] - 600)).toBeLessThan(180);
+    // フレーム: 0..lastFrame、波が来る前はフレーム 0 と同じ（null）
+    expect(r.frames.length).toBe(r.info.lastFrame + 1);
+    expect(r.info.lastFrame).toBe(90);
+    expect(r.frames[0]).not.toBeNull();
+    expect(r.frames[1]).toBeNull();
+    expect(r.frames[r.frames.length - 1]).not.toBeNull();
+    // 潮位計は約10秒ごと
+    expect(r.gaugeT.length).toBe(r.info.lastFrame * 2 + 1);
+    expect(r.gaugeT[1] - r.gaugeT[0]).toBeCloseTo(10, 6);
+    // 陸が浸水し、最大浸水深・到達時刻が記録される
+    let flooded = 0;
+    for (let k = 0; k < r.stats.maxDepth.length; k++) {
+      if (r.stats.maxDepth[k] > 0.01) {
+        flooded++;
+        expect(Number.isFinite(r.stats.arrival[k])).toBe(true);
+        expect(grid.kind[k]).not.toBe(1);
+      }
+      if (grid.kind[k] === 1) {
+        expect(r.stats.maxDepth[k]).toBe(0);
+        expect(r.stats.arrival[k]).toBe(Infinity);
+      }
+    }
+    expect(flooded).toBeGreaterThan(50);
+    // 進捗は単調増加で 1 に達する
+    for (let i = 1; i < r.progress.length; i++) expect(r.progress[i]).toBeGreaterThanOrEqual(r.progress[i - 1] - 1e-9);
+    expect(r.progress[r.progress.length - 1]).toBeCloseTo(1, 6);
+  }, 120_000);
+
+  it("'fall'（引き波から）では海岸で最初に水位が下がる", () => {
+    const sc = scenario({ coastHeight: 4, arrivalMin: 12, firstMotion: 'fall' });
+    const r = run(grid, params(sc));
+    const thr = 0.1 * 4;
+    const first = r.gaugeEta.findIndex((v) => Math.abs(v) > thr);
+    expect(first).toBeGreaterThan(0);
+    expect(r.gaugeEta[first]).toBeLessThan(0);
+    let iMin = 0;
+    let iMax = 0;
+    r.gaugeEta.forEach((v, i) => {
+      if (v < r.gaugeEta[iMin]) iMin = i;
+      if (v > r.gaugeEta[iMax]) iMax = i;
+    });
+    expect(iMin).toBeLessThan(iMax);
+    expect(r.gaugeEta[iMin]).toBeLessThan(-0.3 * 4);
+    expect(Math.abs(r.stats.achievedCoastMax - 4) / 4).toBeLessThan(0.15);
+  }, 120_000);
+
+  it('津波の高さが潮位以下なら波を入れず、静かな海のフレームを出す', () => {
+    const sc = scenario({ coastHeight: 0.04 });
+    const r = run(grid, params(sc, { tideTP: 0, durationMin: 20 }));
+    expect(r.cal.boundaryAmplitude).toBe(0);
+    expect(r.cal.notes.length).toBeGreaterThan(0);
+    expect(r.frames.length).toBe(61);
+    expect(r.frames[0]).not.toBeNull();
+    for (let f = 1; f < r.frames.length; f++) expect(r.frames[f]).toBeNull();
+    expect(r.stats.achievedCoastMax).toBeCloseTo(0, 5);
+    expect(r.stats.maxDepth.every((v) => v === 0)).toBe(true);
+    expect(r.stats.arrival.every((v) => v === Infinity)).toBe(true);
+    expect(r.gaugeEta.every((v) => Math.abs(v) < 1e-6)).toBe(true);
+    expect(r.perf.steps).toBe(0);
+  });
+
+  it('潮位より低い陸が海に接している場合は t=0 から計算する（静止を仮定しない）', () => {
+    // 合成地形の砂浜の汀線は T.P.+0.3 m。潮位 +0.5 m では満潮で砂浜の下部が冠水する
+    const sc = scenario({ coastHeight: 0.5 });
+    const r = run(grid, params(sc, { tideTP: 0.5, durationMin: 5 }));
+    expect(r.cal.boundaryAmplitude).toBe(0);
+    expect(r.frames.every((f) => f !== null)).toBe(true);
+    expect(r.perf.steps).toBeGreaterThan(0);
+    let wet = 0;
+    for (let k = 0; k < r.stats.maxDepth.length; k++) if (r.stats.maxDepth[k] > 0.01) wet++;
+    expect(wet).toBeGreaterThan(0);
+  });
+
+  it('到達時間が伝播時間より短いときは開始を 0 にして注記する', () => {
+    const sc = scenario({ coastHeight: 3, arrivalMin: 1, waves: 1 });
+    const r = run(grid, params(sc, { durationMin: 15 }));
+    expect(r.cal.boundaryStartSec).toBe(0);
+    expect(r.cal.expectedCrestSec).toBeGreaterThan(60);
+    expect(r.cal.notes.some((s) => s.includes('到達時間'))).toBe(true);
+  }, 60_000);
+
+  it('地形データの大きさが合わなければ日本語のエラー', () => {
+    const bad = { ...grid, z: new Float32Array(10) };
+    expect(() => run(bad, params(scenario({})))).toThrow(/地形データ/);
+  });
+});

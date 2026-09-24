@@ -1,0 +1,121 @@
+/**
+ * 2D 地図モジュール専用の最小限のスタイル（クラス名は m2d- で始める）。
+ * 全体のレイアウト・配色は UI 担当の CSS に任せ、ここでは地図上の要素だけを扱う。
+ */
+const CSS = `
+.m2d-root { position: absolute; inset: 0; overflow: hidden; }
+.m2d-root .maplibregl-map { font: 12px/1.4 system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", sans-serif; }
+.m2d-root.m2d-placing .maplibregl-canvas-container.maplibregl-interactive,
+.m2d-root.m2d-placing .maplibregl-canvas { cursor: crosshair; }
+
+/* 通知（範囲外クリックなど）と配置モードのヒント */
+.m2d-hint, .m2d-toast {
+  position: absolute; left: 50%; transform: translateX(-50%); z-index: 4;
+  max-width: calc(100% - 96px); box-sizing: border-box;
+  padding: 5px 12px; border-radius: 999px; font-size: 12.5px; line-height: 1.4;
+  pointer-events: none; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.m2d-hint {
+  top: 10px; background: rgba(255,255,255,.96); color: #0f172a; box-shadow: 0 1px 4px rgba(15,23,42,.25); border: 1px solid #cbd5e1;
+  pointer-events: auto; white-space: normal; overflow: visible; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 0 2px;
+  width: max-content; max-width: calc(100% - 110px); padding: 4px 6px 4px 12px;
+}
+.m2d-hint b { color: #0369a1; }
+.m2d-hint__more { color: #475569; }
+.m2d-hint__done {
+  margin-left: 6px; font: inherit; font-size: 12px; font-weight: 600; line-height: 1.2; color: #fff; background: #0369a1;
+  border: 0; border-radius: 999px; padding: 4px 10px; cursor: pointer;
+}
+.m2d-hint__done:hover { background: #075985; }
+.m2d-hint__done:focus-visible { outline: 2px solid #0ea5e9; outline-offset: 2px; }
+@media (max-width: 520px) {
+  .m2d-hint { max-width: calc(100% - 64px); left: 8px; transform: none; border-radius: 12px; }
+  .m2d-hint__more { display: none; }
+  .m2d-toast { max-width: calc(100% - 64px); left: 8px; transform: none; white-space: normal; border-radius: 10px; }
+}
+.m2d-toast { top: 10px; background: rgba(15,23,42,.9); color: #fff; opacity: 0; transition: opacity .18s ease; }
+.m2d-toast.m2d-show { opacity: 1; }
+.m2d-hint[hidden] { display: none; }
+
+/* 計算範囲ラベル */
+.m2d-domain-label {
+  pointer-events: none; font-size: 11px; font-weight: 600; color: #1e293b; white-space: nowrap;
+  background: rgba(255,255,255,.82); border: 1px dashed #334155; border-radius: 3px; padding: 0 5px; margin: 4px 0 0 4px;
+}
+
+/* 主な地点 */
+.m2d-poi {
+  pointer-events: none; font-size: 11px; color: #334155; white-space: nowrap; font-weight: 500;
+  text-shadow: 0 0 2px #fff, 0 0 2px #fff, 0 0 3px #fff;
+}
+.m2d-poi::before { content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #475569; margin-right: 3px; vertical-align: 1px; }
+.m2d-zlow .m2d-poi { display: none; }
+
+/* 避難場所 */
+.m2d-shelter { width: 24px; height: 24px; cursor: pointer; }
+.m2d-shelter__dot {
+  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; color: #fff;
+  background: var(--m2d-c, #15803d); border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.45);
+  transition: transform .12s ease;
+}
+.m2d-shelter__dot svg { width: 14px; height: 14px; display: block; }
+.m2d-shelter:hover .m2d-shelter__dot, .m2d-shelter:focus-visible .m2d-shelter__dot { transform: scale(1.18); }
+.m2d-shelter:focus-visible { outline: none; }
+.m2d-shelter:focus-visible .m2d-shelter__dot { box-shadow: 0 0 0 3px #0ea5e9; }
+.m2d-shelter--target .m2d-shelter__dot { box-shadow: 0 0 0 3px rgba(250,204,21,.95), 0 1px 3px rgba(0,0,0,.45); }
+.m2d-zlow .m2d-shelter__dot { transform: scale(.62); }
+.m2d-zlow .m2d-shelter__dot svg { visibility: hidden; }
+.m2d-popup .maplibregl-popup-content { padding: 8px 12px 9px; border-radius: 8px; font-size: 12px; line-height: 1.5; color: #0f172a; max-width: 260px; }
+.m2d-popup h4 { margin: 0 18px 2px 0; font-size: 13.5px; line-height: 1.35; }
+.m2d-popup .m2d-pk { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 999px; color: #fff; margin-bottom: 3px; }
+.m2d-popup p { margin: 2px 0 0; }
+.m2d-popup .m2d-src { color: #64748b; font-size: 10.5px; margin-top: 4px; }
+
+/* 人物 */
+.m2d-person { width: 34px; height: 34px; cursor: pointer; }
+.m2d-person.m2d-drag { cursor: grab; }
+.m2d-person__disc {
+  position: absolute; inset: 0; border-radius: 50%; background: #fff; box-sizing: border-box;
+  border: 3px solid var(--m2d-ring, #64748b); display: grid; place-items: center; color: var(--m2d-kind, #1e293b);
+  box-shadow: 0 1px 4px rgba(0,0,0,.45); transition: transform .12s ease, box-shadow .12s ease;
+}
+.m2d-person__disc svg { width: 24px; height: 24px; display: block; }
+.m2d-person__badge {
+  position: absolute; right: -5px; top: -5px; width: 17px; height: 17px; border-radius: 50%; box-sizing: border-box;
+  background: var(--m2d-ring, #64748b); border: 1.5px solid #fff; color: #fff; display: grid; place-items: center;
+}
+.m2d-person__badge svg { width: 13px; height: 13px; display: block; }
+.m2d-person__label {
+  position: absolute; top: 37px; left: 50%; transform: translateX(-50%); white-space: nowrap; pointer-events: none;
+  font-size: 11px; line-height: 1.35; color: #0f172a; background: rgba(255,255,255,.93); border-radius: 4px;
+  padding: 0 4px; box-shadow: 0 0 0 1px rgba(15,23,42,.18);
+}
+.m2d-person__depth { display: inline-block; margin-left: 3px; padding: 0 4px; border-radius: 3px; color: #fff; background: var(--m2d-ring, #64748b); font-weight: 700; }
+.m2d-person--selected { z-index: 3; }
+.m2d-person--selected .m2d-person__disc { transform: scale(1.18); box-shadow: 0 0 0 3px #fff, 0 0 0 6px #facc15, 0 2px 6px rgba(0,0,0,.5); }
+.m2d-person--selected .m2d-person__label { font-weight: 700; box-shadow: 0 0 0 1.5px #ca8a04; }
+.m2d-person:focus-visible { outline: none; }
+.m2d-person:focus-visible .m2d-person__disc { box-shadow: 0 0 0 3px #0ea5e9; }
+.m2d-person--danger .m2d-person__disc::after, .m2d-person--critical .m2d-person__disc::after {
+  content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 3px solid var(--m2d-ring);
+  animation: m2d-pulse 1.1s ease-out infinite; pointer-events: none;
+}
+.m2d-person--critical .m2d-person__disc::after { animation-duration: .8s; }
+@keyframes m2d-pulse { from { transform: scale(1); opacity: .9; } to { transform: scale(1.9); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .m2d-person--danger .m2d-person__disc::after, .m2d-person--critical .m2d-person__disc::after { animation: none; transform: scale(1.35); opacity: .6; }
+  .m2d-toast { transition: none; }
+}
+`;
+
+let injected = false;
+
+/** スタイルを一度だけ <head> に追加する */
+export function injectMap2dStyles(): void {
+  if (injected || typeof document === 'undefined') return;
+  injected = true;
+  const el = document.createElement('style');
+  el.dataset.module = 'map2d';
+  el.textContent = CSS;
+  document.head.appendChild(el);
+}
