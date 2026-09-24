@@ -7,6 +7,9 @@
  *
  * 描画は setActive(true) の間だけ。状態・カメラ・時刻が変わったとき、または水面のさざ波を
  * 動かしている間だけ再描画する（操作が無い状態が続くとさざ波も止める）。
+ *
+ * 視点移動の要求（store.focus。地名検索・現在地など）は、注視点・距離・向きを別々に補間してなめらかに移す
+ * （3D を表示していない間に来た要求は、表示したときに反映する）。現在地（store.userLocation）は目印で示す。
  */
 import {
   ACESFilmicToneMapping,
@@ -417,15 +420,15 @@ export class View3D {
     this.camera.updateMatrixWorld();
     const w = this.viewportW;
     const h = this.viewportH;
-    const rects: [number, number, number, number][] = [];
-    if (this.people.count > 0 && this.sampler && this.seen.grid) {
-      // 選択リングの脈動などのため毎回更新（数人〜数十人なので軽い）
-      this.updatePeople(now);
-      rects.push(...this.people.labelRects);
-    }
     const p11 = this.camera.projectionMatrix.elements[5];
     this.markers.update(now, h, p11, !this.reducedMotion);
-    if (this.markers.hasContent) rects.push(...this.markers.screenRects(this.camera, w, h));
+    // 目印（現在地・目的地のピン）は人物のラベルより先に場所を取る（ラベルで隠さない）
+    let rects = this.markers.hasContent ? this.markers.screenRects(this.camera, w, h) : [];
+    if (this.people.count > 0 && this.sampler && this.seen.grid) {
+      // 選択リングの脈動などのため毎回更新（数人〜数十人なので軽い）
+      this.updatePeople(now, rects);
+      rects = this.people.labelRects;
+    }
     // 人物のラベル・目印に重なる避難場所のアイコンは薄くする
     if (this.store.get().layers.shelters) this.shelters.declutter(rects, this.camera, w, h);
     r.render(this.scene, this.camera);
@@ -982,7 +985,7 @@ export class View3D {
   // 人物
   // ---------------------------------------------------------------------------
 
-  private updatePeople(now: number): void {
+  private updatePeople(now: number, reserved: [number, number, number, number][] = []): void {
     const s = this.store.get();
     const grid = s.terrain.grid;
     if (!grid || !this.sampler || grid !== this.sampler.grid) return;
@@ -1001,6 +1004,7 @@ export class View3D {
       viewportW: this.viewportW,
       showFlood: s.layers.simFlood && !!s.sim.output,
       waterSurfaceAt: this.waterSurfaceAt,
+      reserved,
     });
   }
 

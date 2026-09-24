@@ -30,10 +30,35 @@ import {
 } from 'three';
 import { SHONAN_PROFILE } from '../terrain/bathymetry';
 
-/** 範囲外の海の水深の推定に使う断面（計算範囲内の海底地形の推定と同じ） */
-const P = SHONAN_PROFILE;
 /** 数値を GLSL の浮動小数点リテラルにする */
 const glsl = (v: number): string => (Number.isInteger(v) ? v.toFixed(1) : String(v));
+
+/** 海底の色（水深 [m, T.P. から下] → 色）: 浅い砂地 → 深い暗色。地形（terrain.ts）と範囲外の海で共通 */
+export const SEA_RAMP: [number, string][] = [
+  [0, '#c9bd98'],
+  [2, '#b3a57f'],
+  [6, '#978a68'],
+  [12, '#786f57'],
+  [25, '#585346'],
+  [50, '#3d3a33'],
+];
+
+/** SEA_RAMP と同じ区分線形の色を返す GLSL 関数（色はリニア） */
+function seabedGlsl(): string {
+  const c = SEA_RAMP.map(([, hex]) => new Color(hex));
+  const v3 = (x: Color) => `vec3(${x.r.toFixed(5)}, ${x.g.toFixed(5)}, ${x.b.toFixed(5)})`;
+  const lines = [`vec3 seabedColor(float d) {`, `  vec3 c = ${v3(c[0])};`];
+  for (let i = 0; i < SEA_RAMP.length - 1; i++) {
+    const a = SEA_RAMP[i][0];
+    const b = SEA_RAMP[i + 1][0];
+    lines.push(`  c = mix(c, ${v3(c[i + 1])}, clamp((d - ${glsl(a)}) / ${glsl(b - a)}, 0.0, 1.0));`);
+  }
+  lines.push('  return c;', '}');
+  return lines.join('\n');
+}
+
+/** 範囲外の海の水深の推定に使う断面（計算範囲内の海底地形の推定と同じ） */
+const P = SHONAN_PROFILE;
 
 /** 太陽の方向（南南東・高度 42°）。x=東, y=上, z=南 */
 export const SUN_DIR = (() => {
@@ -199,7 +224,10 @@ void main() {
   float dOut = max(max(q.x, q.y), 0.0);
   float edgeEta = uHasEdge > 0.5 ? edgeAt(p.xz).y : uEdgeEta;
   float eta = mix(edgeEta, uSeaLevel, smoothstep(0.0, 4000.0, dOut));
-  p.y = mix(-0.6, eta, sea);
+  // 計算範囲の内側の頂点は 1 m 下げる。範囲の端で水面メッシュと重ねている帯（12 m）では
+  // 範囲内の水面が必ず上になり、奥にある断面（スカート）も透けない
+  float inside = step(max(q.x, q.y), 0.0);
+  p.y = mix(-0.6, eta, sea) - inside;
   vSea = sea;
   vAnom = eta - uSeaLevel;
   vLocal = p;
@@ -218,8 +246,7 @@ uniform vec4 uDomain;
 uniform vec3 uDeep;
 uniform vec3 uShallow;
 uniform vec3 uCrest;
-uniform vec3 uSeabedShallow;
-uniform vec3 uSeabedDeep;
+uniform float uSeaLevel;
 uniform vec3 uLand;
 uniform vec3 uSand;
 uniform vec3 uSunDir;
@@ -240,6 +267,7 @@ float coastAt(float x) {
   return mix(uCoastZ.x, uCoastZ.y, smoothstep(uDomain.x, uDomain.y, x));
 }
 // 汀線からの距離 [m] → 推定水深 [m]（src/terrain/bathymetry.ts の offshoreDepth と同じ式・同じ値）
+${seabedGlsl()}
 float shoreProfile(float x) {
   const float xc = ${glsl(Math.pow((P.closureDepth - P.minDepth) / P.deanA, 1.5))};
   return x <= xc ? ${glsl(P.minDepth)} + ${glsl(P.deanA)} * pow(x, 2.0 / 3.0) : ${glsl(P.closureDepth)} + (x - xc) * ${glsl(P.outerSlope)};
@@ -264,7 +292,7 @@ void main() {
     vec2 q = max(vec2(uDomain.x - vLocal.x, vLocal.z - uDomain.w), vec2(vLocal.x - uDomain.y, uDomain.z - vLocal.z));
     float dOut = max(max(q.x, q.y), 0.0);
     float De = edgeAt(vLocal.xz).x + max(vLocal.z - uDomain.w, 0.0) / 80.0;
-    D = mix(De, Dp, smoothstep(0.0, 1500.0, dOut));
+    D = mix(De, Dp, smoothstep(0.0, 800.0, dOut));
   }
   float an = vAnom / (abs(vAnom) + 1.5);
   vec3 wc = mix(uShallow, uDeep, smoothstep(0.4, 16.0, D));
@@ -273,7 +301,7 @@ void main() {
   vec3 sea = shadeWater(wc, n, V, uSunDir, uSunColor, uHorizon, uZenith, 0.8, fres);
   // 浅い所は海底が透けて見える（範囲内では半透明の水面の下に地形が見えるのと同じ見た目に。
   // 海底の色・明るさ・水の透明度は terrain.ts・water.ts と同じ式）
-  vec3 bed = mix(uSeabedShallow, uSeabedDeep, smoothstep(0.0, 25.0, D)) * (uSkyColor + uSunColor * max(uSunDir.y, 0.0) * 0.78);
+  vec3 bed = seabedColor(max(D - vAnom - uSeaLevel, 0.0)) * (uSkyColor + uSunColor * max(uSunDir.y, 0.0) * 0.78);
   float film = smoothstep(0.03, 0.35, D);
   float aSea = mix(mix(0.5, 1.0, smoothstep(0.3, 8.0, D)) * mix(0.3, 1.0, film), 1.0, fres * 0.45);
   sea = mix(bed, sea, aSea);
@@ -333,8 +361,6 @@ export class Environment {
           uDeep: { value: PALETTE.deepSea.clone() },
           uShallow: { value: PALETTE.shallowSea.clone() },
           uCrest: { value: PALETTE.crest.clone() },
-          uSeabedShallow: { value: new Color('#c9bd98') },
-          uSeabedDeep: { value: new Color('#585346') },
           uEdgeDim: { value: [1, 1, 1] },
           uCellDx: { value: 1 },
           uHasEdge: { value: 0 },
@@ -346,10 +372,6 @@ export class Environment {
       vertexShader: OUTER_VERT,
       fragmentShader: OUTER_FRAG,
       fog: true,
-      // 計算範囲の端で水面メッシュと少し重ねているので、重なった所では範囲内の水面が勝つよう奥へ寄せる
-      polygonOffset: true,
-      polygonOffsetFactor: 2,
-      polygonOffsetUnits: 8,
     });
     // UniformsUtils.merge は値を複製するので、共有したいものは後から差し替える
     Object.assign(this.outerMat.uniforms, {

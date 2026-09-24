@@ -25,7 +25,7 @@ import {
   type Texture,
 } from 'three';
 import { CELL_INLAND_WATER, CELL_SEA, type TerrainGrid } from '../core/types';
-import { LIGHT_UNIFORMS } from './environment';
+import { LIGHT_UNIFORMS, SEA_RAMP } from './environment';
 
 const TERRAIN_VERT = /* glsl */ `
 #include <common>
@@ -112,15 +112,6 @@ const LAND_RAMP: [number, string][] = [
   [45, '#a48c62'],
   [70, '#a9906f'],
   [120, '#b8a894'],
-];
-/** 海底（水深 [m] → 色）: 浅い砂地 → 深い暗色 */
-const SEA_RAMP: [number, string][] = [
-  [0, '#c9bd98'],
-  [2, '#b3a57f'],
-  [6, '#978a68'],
-  [12, '#786f57'],
-  [25, '#585346'],
-  [50, '#3d3a33'],
 ];
 const SAND = new Color('#e3d4ab');
 const POND = new Color('#5b8aa6');
@@ -325,15 +316,19 @@ export class TerrainLayer {
     const indices: number[] = [];
     const top = new Color('#8a6f4f');
     const bottom = new Color('#3f3326');
+    const seaTop = new Color();
     const edge = (pts: [number, number][], nxv: number, nzv: number) => {
       const start = positions.length / 3;
       for (const [i, j] of pts) {
         const x = (i + 0.5 - nx / 2) * dx;
         const zz = (j + 0.5 - ny / 2) * dx;
-        const h = z[j * nx + i];
+        const k = j * nx + i;
+        const h = z[k];
         positions.push(x, h, zz, x, base, zz);
         normals.push(nxv, 0, nzv, nxv, 0, nzv);
-        colors.push(top.r, top.g, top.b, bottom.r, bottom.g, bottom.b);
+        // 海の部分は、浅い所の半透明の水面越しに見えても目立たないよう、その場所の海底と同じ色から暗くする
+        const t = grid.kind[k] === CELL_SEA ? rampColor(SEA, -h, seaTop) : top;
+        colors.push(t.r, t.g, t.b, bottom.r, bottom.g, bottom.b);
       }
       for (let q = 0; q < pts.length - 1; q++) {
         const a = start + q * 2;

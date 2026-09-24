@@ -147,6 +147,8 @@ export interface PeopleUpdateContext {
   showFlood: boolean;
   /** 描画中の水面の高さ [m, T.P.]（見えていなければ null） */
   waterSurfaceAt: (x: number, z: number) => number | null;
+  /** ラベルで隠さない画面上の範囲 [x0, y0, x1, y1]（現在地・目的地の目印など） */
+  reserved?: [number, number, number, number][];
 }
 
 export class PeopleLayer {
@@ -164,7 +166,7 @@ export class PeopleLayer {
   private readonly entries = new Map<string, Entry>();
   private readonly tmp = new Vector3();
   private laneSeq = 0;
-  /** 表示中のラベルの画面上の範囲 [x0, y0, x1, y1]（update のたびに更新。避難場所のアイコンを薄くする判定に使う） */
+  /** 表示中のラベル（と reserved）の画面上の範囲 [x0, y0, x1, y1]（update のたびに更新。避難場所のアイコンを薄くする判定に使う） */
   labelRects: [number, number, number, number][] = [];
 
   constructor() {
@@ -474,7 +476,7 @@ export class PeopleLayer {
       const sb = b.person.id === c.selectedId ? 100 : sev[b.state?.status ?? 'waiting'] ?? 0;
       return sb - sa;
     });
-    const placed: [number, number, number, number][] = [];
+    const placed: [number, number, number, number][] = [...(c.reserved ?? [])];
     this.labelRects = placed;
     const v = this.tmp;
     // 数 px の重なりは許す（ラベルの影・しっぽの分）

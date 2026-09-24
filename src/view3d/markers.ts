@@ -2,9 +2,9 @@
  * 地点の目印: 現在地（ブラウザの位置情報）と、視点移動（地名検索など）の目的地。
  *
  * - 現在地: 地形（浸水中はその水面）に沿わせた精度の円（半透明の塗りと、画面上で一定の太さの縁）、
- *   中心の青い点、広がって消える輪（脈動。「動きを減らす」設定では出さない）。
+ *   中心の青い点、広がって消える輪（脈動。「動きを減らす」設定では止めた薄い輪）。
  *   中心の点は建物などに隠れないよう常に手前に描く。
- * - 目的地: 地名のラベル付きのピン（focus.label があるときだけ）。次の視点移動まで表示する。
+ * - 目的地: 地名のラベル付きのピン（focus.label があるときだけ）。次の視点移動か、要求が取り消される（focus = null）まで表示する。
  * 位置の y は鉛直強調をかけた値（このグループ自体は強調しない）。
  */
 import {
@@ -304,9 +304,9 @@ export class MarkerLayer {
   }
 
   /**
-   * 画面上の大きさ・脈動を更新。脈動中（連続して描き直す必要がある）なら true
+   * 画面上の大きさ・脈動を更新（描画のたびに呼ぶ）。animate が false（「動きを減らす」設定）なら脈動させない
    */
-  update(now: number, viewportH: number, p11: number, animate: boolean): boolean {
+  update(now: number, viewportH: number, p11: number, animate: boolean): void {
     if (this.user) {
       const k = spriteScaleForPx(DOT_PX, viewportH, p11);
       this.dot.scale.set(k, k, 1);
@@ -328,7 +328,6 @@ export class MarkerLayer {
       const k = spriteScaleForPx(1, viewportH, p11);
       this.pin.scale.set(this.pinW * k, this.pinH * k, 1);
     }
-    return !!this.user && animate;
   }
 
   /** 画面上のラベル・点の範囲 [x0, y0, x1, y1]（避難場所のアイコンを薄くする判定に使う） */

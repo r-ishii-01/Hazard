@@ -55,7 +55,7 @@ uniform float uDx;
 uniform float uTime;
 uniform float uTide;
 varying vec4 vA;    // 水の厚さ h, 全水深 D, 表示 α, 上昇速度
-varying vec3 vB;    // 陸か, (未使用), 平常の潮位からの高さ
+varying vec2 vB;    // 陸か, 平常の潮位からの高さ
 varying vec2 vGrad;
 varying vec3 vWorld;
 varying vec2 vXZ;
@@ -85,7 +85,7 @@ void main() {
   float sw = sin(p.x * 0.011 + p.z * 0.019 - uTime * 0.8) * 0.16 + sin(-p.x * 0.017 + p.z * 0.029 - uTime * 1.15) * 0.09;
   p.y += sw * deep;
   vA = vec4(aW.x - aBed, aW.y, aW.z, aW.w);
-  vB = vec3(aLand, 0.0, aW.x - uTide);
+  vB = vec2(aLand, aW.x - uTide);
   vGrad = aW.z > 0.0 ? surfaceGradient(ij, aW) : vec2(0.0);
   vXZ = p.xz;
   vec4 wp = modelMatrix * vec4(p, 1.0);
@@ -117,7 +117,7 @@ uniform float uClassMode;
 uniform float uClassMin[${NCLASS}];
 uniform vec3 uClassColor[${NCLASS}];
 varying vec4 vA;
-varying vec3 vB;
+varying vec2 vB;
 varying vec2 vGrad;
 varying vec3 vWorld;
 varying vec2 vXZ;
@@ -153,7 +153,7 @@ void main() {
   // 海: 水深が浅いと海底の砂が透けた青緑、深いと藍色
   vec3 sea = mix(uShallow, uDeep, smoothstep(0.4, 16.0, D));
   // 平常の潮位からの高さで、波の山はやや白っぽく、谷はやや暗く（なめらかに飽和させ、境目を作らない）
-  float an = vB.z / (abs(vB.z) + 1.5);
+  float an = vB.y / (abs(vB.y) + 1.5);
   sea = mix(sea, uCrest, max(an, 0.0) * 0.24);
   sea *= 1.0 - 0.25 * max(-an, 0.0);
 
@@ -275,8 +275,6 @@ export class WaterLayer {
           uGrid: { value: new Vector2(1, 1) },
           uDx: { value: 1 },
           uClassMode: { value: 0 },
-          uClassMin: { value: classMin },
-          uClassColor: { value: classColor },
         },
       ]),
       vertexShader: WATER_VERT,
@@ -285,7 +283,7 @@ export class WaterLayer {
       depthWrite: false,
       fog: true,
     });
-    // UniformsUtils.merge は値を複製するので、配列の uniform と共有したいものは後から差し替える
+    // UniformsUtils.merge は値を複製する（テクスチャ・配列・共有の uniform は複製しないよう後から加える）
     Object.assign(this.material.uniforms, {
       uW: { value: null },
       uClassMin: { value: classMin },
