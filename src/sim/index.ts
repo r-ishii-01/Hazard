@@ -7,7 +7,9 @@
  *   output は以後も内部でフレームが追加されていく（framesReady()/timeReady() が増える）。
  * - handlers.onProgress(0..1, message) を適宜、完了時 onDone()、失敗時 onError(message)。
  *
- * 計算の中身は solver.ts（差分スキーム）・engine.ts（校正・出力の手順）・band.ts（並列計算）を参照。
+ * 計算の中身は solver.ts（差分スキーム）・engine.ts（校正・出力の手順）・band.ts（並列計算）、
+ * ワーカー側のメッセージ処理は workerCore.ts（worker.ts はそれを Worker につなぐだけ）を参照。
+ * 計算の終了・中止・再実行ではワーカーを終了してハンドラも外すので、古い計算の結果が残り続けることはない。
  * 大きな格子では、本計算を行の帯に分けて複数のワーカーで並列に計算する（結果は逐次計算とビット単位で同じ）。
  * output は SimOutput に加えて calibrationDetail・notes・revision・complete・perf を持つ（SimRunOutput）。
  */
@@ -73,7 +75,7 @@ export class SimRunner {
     const workers: Worker[] = [];
     this.workers = workers;
     const stopAll = () => {
-      for (const w of workers) w.terminate();
+      for (const w of workers) stopWorker(w);
       workers.length = 0;
       if (this.workers === workers) this.workers = [];
     };
@@ -167,7 +169,7 @@ export class SimRunner {
       } catch (e) {
         // 追加のワーカーを起動できない環境: 逐次計算に切り替える
         console.warn('[sim] parallel start failed; falling back to serial', e);
-        for (const w of helpers) w.terminate();
+        for (const w of helpers) stopWorker(w);
         workers.length = 1;
         w0.postMessage({ type: 'serial' } satisfies WorkerRequest);
         return;
@@ -301,7 +303,15 @@ export class SimRunner {
   /** 実行中の計算を中止する（受信済みの結果はそのまま使える） */
   cancel(): void {
     this.seq++;
-    for (const w of this.workers) w.terminate();
+    for (const w of this.workers) stopWorker(w);
     this.workers = [];
   }
+}
+
+/** ワーカーを終了し、ハンドラを外す（終了したワーカーへの参照が残っても、計算結果を抱え込まないように） */
+function stopWorker(w: Worker): void {
+  w.terminate();
+  w.onmessage = null;
+  w.onerror = null;
+  w.onmessageerror = null;
 }

@@ -147,14 +147,16 @@ export interface PreparedRun {
  * 準備: 開始情報・フレーム 0・校正・静止区間のフレーム・最大値の初期値を sink に出し、本計算の条件を返す。
  * opts.bands（>1）を指定すると、本計算を行の帯に分ける分割も求める。
  */
-export function prepareRun(input: EngineInput, sink: EngineSink, opts: EngineOptions = {}): PreparedRun {
+export function prepareRun(rawInput: EngineInput, sink: EngineSink, opts: EngineOptions = {}): PreparedRun {
   const now = opts.now ?? (() => performance.now());
-  const { spec, params } = input;
+  const { spec, params } = rawInput;
   const { nx, ny } = spec;
   const n = nx * ny;
-  if (input.z.length !== n || input.kind.length !== n || input.manning.length !== n) {
+  if (!(nx > 2 && ny > 2) || rawInput.z.length !== n || rawInput.kind.length !== n || rawInput.manning.length !== n) {
     throw new Error('地形データの大きさが計算格子と一致しません');
   }
+  // 地盤高が数値でないセル（欠測など）はソルバと同じく 0 m とみなす（伝播時間などの計算が NaN にならないように）
+  const input: EngineInput = { ...rawInput, z: finiteElevation(rawInput.z) };
   const sc = params.scenario;
   const tide = Number.isFinite(params.tideTP) ? params.tideTP : 0;
   const frameInterval = frameIntervalFor(params.resolution);
@@ -351,6 +353,16 @@ export function coastMax(solver: ShallowWaterSolver, cells: ArrayLike<number>, t
   }
   const p = percentile(v, 90);
   return Number.isFinite(p) ? p : tide;
+}
+
+/** 数値でない地盤高を 0 にした配列（すべて有限ならそのまま返す）。ShallowWaterSolver の扱いと同じ */
+export function finiteElevation(z: Float32Array): Float32Array {
+  let k = 0;
+  while (k < z.length && Number.isFinite(z[k])) k++;
+  if (k === z.length) return z;
+  const out = Float32Array.from(z);
+  for (; k < out.length; k++) if (!Number.isFinite(out[k])) out[k] = 0;
+  return out;
 }
 
 function gaugeEta0(input: EngineInput, k: number, tide: number): number {

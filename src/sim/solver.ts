@@ -26,6 +26,9 @@
  * 差分:
  * - リープフロッグ（η と M,N を半ステップずらして交互に更新）。
  * - 移流項は1次風上差分（TUNAMI-N2 と同じく、M·N の交差項は面の周囲4点平均の N̄/M̄ を用いる）。
+ *   ただし流量がちょうど 0 の面（濡れ始めた先端など）では風上の向きが決まらないので中心差分とする
+ *   （TUNAMI の「M ≥ 0 なら後退差分」をそのまま使うと、先端が東・南へ進む場合と西・北へ進む場合で結果が変わる）。
+ *   これにより、地形と初期値を東西・南北に反転・転置した計算は、丸め誤差の範囲で反転・転置した結果になる（テストで確認）。
  * - 底面摩擦（マニング則）は半陰的: M^{n+1}(1 + Δt g n² |Q^n| / D^{7/3}) = M^n − Δt(圧力項 + 移流項)。
  * - 遡上（移動境界）: 面の全水深を D_face = max(η_L, η_R) − max(z_L, z_R) とし、D_face ≤ DRY_DEPTH の面は流量 0。
  *   乾燥セルでは η = z（+ごく薄い水膜）なので、湿潤側の水位が乾燥側の地盤より高いときだけ流れる
@@ -779,8 +782,10 @@ export class ShallowWaterSolver {
         const nb = bNbM[s];
         let adv = 0;
         if (df > ADVECTION_MIN_DEPTH) {
-          adv = m >= 0 ? bFM[s] - bFM[s - 1] : bFM[s + 1] - bFM[s];
-          adv += nb >= 0 ? bGM[s] - bGM[sU + i] : bGM[sD + i] - bGM[s];
+          // 風上差分。流量がちょうど 0 の面（濡れ始めた先端など）は向きが決まらないので中心差分にする
+          // （どちらかに決め打ちすると、東西・南北で先端の進み方が非対称になる）
+          adv = m > 0 ? bFM[s] - bFM[s - 1] : m < 0 ? bFM[s + 1] - bFM[s] : 0.5 * (bFM[s + 1] - bFM[s - 1]);
+          adv += nb > 0 ? bGM[s] - bGM[sU + i] : nb < 0 ? bGM[sD + i] - bGM[s] : 0.5 * (bGM[sD + i] - bGM[sU + i]);
         }
         let v = m - gdtdx * df * grad - rdx * adv;
         const q2 = m * m + nb * nb;
@@ -826,10 +831,11 @@ export class ShallowWaterSolver {
         const mb = bMbN[s];
         let adv = 0;
         if (df > ADVECTION_MIN_DEPTH) {
-          adv = v0 >= 0 ? bFN[s] - bFN[sU + i] : bFN[sD + i] - bFN[s];
-          if (mb >= 0) {
-            if (i > 0) adv += bGN[s] - bGN[s - 1];
-          } else if (i < last) adv += bGN[s + 1] - bGN[s];
+          // x 方向の運動方程式と同じ扱い（格子の端では外側の値を内側の値で代用）
+          const sL = i > 0 ? s - 1 : s;
+          const sR = i < last ? s + 1 : s;
+          adv = v0 > 0 ? bFN[s] - bFN[sU + i] : v0 < 0 ? bFN[sD + i] - bFN[s] : 0.5 * (bFN[sD + i] - bFN[sU + i]);
+          adv += mb > 0 ? bGN[s] - bGN[sL] : mb < 0 ? bGN[sR] - bGN[s] : 0.5 * (bGN[sR] - bGN[sL]);
         }
         let v = v0 - gdtdx * df * (eta[f] - eta[f - nx]) - rdx * adv;
         const q2 = v0 * v0 + mb * mb;

@@ -318,3 +318,60 @@ describe('質量収支（開境界あり）と乾燥セルを越える流れ', (
     expect(high.pocketWater).toBeGreaterThan(0.05);
   });
 });
+
+describe('差分の対称性（x・y の扱いと符号の向きの確認）', () => {
+  // すり鉢状の閉じた水域（中央に島）。中心から外れた水位の山を置くと、先端が東西南北すべての向きに陸へ遡上する
+  const N = 40;
+  const base = (i: number, j: number) => {
+    const r = Math.hypot(i - 19.5, j - 19.5);
+    return -3 + 0.45 * Math.max(0, r - 9) + (Math.abs(i - 23) + Math.abs(j - 16) < 3 ? 6 : 0);
+  };
+  function run(tf: (i: number, j: number) => [number, number]) {
+    const { solver } = solverFor(
+      {
+        nx: N,
+        ny: N,
+        dx: 10,
+        z: (i, j) => base(...tf(i, j)),
+        kind: (_i, _j, z) => (z < 0 ? CELL_SEA : CELL_LAND),
+      },
+      { open: CLOSED, waveHeight: 3, dt: 0.5 },
+    );
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const [a, b] = tf(i, j);
+        const k = j * N + i;
+        if (solver.depth(k) > 0) solver.eta[k] += 2.2 * Math.exp(-((a - 14) ** 2 + (b - 22) ** 2) / 10);
+      }
+    }
+    let wetLand = 0;
+    for (let s = 0; s < 700; s++) {
+      solver.step();
+      if (s % 50 === 0) for (let k = 0; k < N * N; k++) if (solver.isLand[k] && solver.depth(k) > 0.01) wetLand++;
+    }
+    return { solver, wetLand };
+  }
+  const ref = run((i, j) => [i, j]);
+
+  it('参照の計算で陸への遡上が起きている', () => {
+    expect(ref.wetLand).toBeGreaterThan(50);
+  });
+
+  for (const [name, tf] of [
+    ['転置（x ↔ y）', (i: number, j: number): [number, number] => [j, i]],
+    ['南北反転', (i: number, j: number): [number, number] => [i, N - 1 - j]],
+    ['東西反転', (i: number, j: number): [number, number] => [N - 1 - i, j]],
+  ] as const) {
+    it(`${name}した地形・初期値の結果は、参照の結果を${name}したものと一致する`, () => {
+      const { solver } = run(tf);
+      let diff = 0;
+      for (let j = 0; j < N; j++) {
+        for (let i = 0; i < N; i++) {
+          const [a, b] = tf(i, j);
+          diff = Math.max(diff, Math.abs(solver.eta[j * N + i] - ref.solver.eta[b * N + a]));
+        }
+      }
+      expect(diff).toBeLessThan(1e-9);
+    });
+  }
+});

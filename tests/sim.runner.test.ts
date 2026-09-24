@@ -28,9 +28,11 @@ class FakeWorker {
     FakeWorker.all.push(this);
     this.core = createWorkerCore((message, transfer) => {
       const data = structuredClone(message, { transfer });
+      // 送信時点のハンドラに配達する（終了の直前に送られ、配達待ちだったメッセージの再現）
+      const handler = this.onmessage;
       setTimeout(() => {
         if (this.terminated) this.lateMessages++;
-        this.onmessage?.({ data } as MessageEvent);
+        handler?.({ data } as MessageEvent);
       }, 0);
     });
   }
@@ -48,6 +50,8 @@ class FakeWorker {
     this.core.dispose();
   }
 }
+
+const released = (w: FakeWorker) => w.terminated && w.onmessage === null && w.onerror === null;
 
 const scenario: QuakeScenario = {
   id: 'runner',
@@ -181,7 +185,7 @@ describe('SimRunner とワーカーのやり取り', () => {
     expect(Number.isFinite(out.achievedCoastMax())).toBe(true);
     for (let i = 1; i < rec.progress.length; i++) expect(rec.progress[i]).toBeGreaterThanOrEqual(rec.progress[i - 1] - 1e-9);
     expect(FakeWorker.all.length).toBe(1);
-    expect(FakeWorker.all.every((w) => w.terminated)).toBe(true);
+    expect(FakeWorker.all.every(released)).toBe(true);
     // 完了後に何も届かない
     const calls = rec.calls;
     await drain();
@@ -211,7 +215,7 @@ describe('SimRunner とワーカーのやり取り', () => {
     expect(second.outputs.length).toBe(1);
     expect(second.done).toBe(1);
     expect(second.errors).toEqual([]);
-    expect(FakeWorker.all.every((w) => w.terminated)).toBe(true);
+    expect(FakeWorker.all.every(released)).toBe(true);
   }, 120_000);
 
   it('run を続けて呼ぶと、最後の計算だけが結果を返す', async () => {
@@ -242,7 +246,7 @@ describe('SimRunner とワーカーのやり取り', () => {
     };
     runner.run(grid, params({ durationMin: 10 }), rec.handlers);
     while (calls < 0) await drain(5);
-    expect(FakeWorker.all.every((w) => w.terminated)).toBe(true);
+    expect(FakeWorker.all.every(released)).toBe(true);
     await drain(200);
     expect(rec.calls).toBe(calls);
     expect(rec.done).toBe(0);
@@ -261,7 +265,7 @@ describe('SimRunner とワーカーのやり取り', () => {
     expect(rec.done).toBe(0);
     expect(rec.errors.length).toBe(1);
     expect(rec.errors[0]).toMatch(/地形データ/);
-    expect(FakeWorker.all.every((w) => w.terminated)).toBe(true);
+    expect(FakeWorker.all.every(released)).toBe(true);
   }, 60_000);
 });
 
@@ -316,7 +320,7 @@ describe('SimRunner の並列計算（行の帯）', () => {
     const par = await runWith({ maxWorkers: 3, parallelMinCells: 1 });
     expect(par.out.perf?.bands).toBe(3);
     expect(FakeWorker.all.length).toBe(3);
-    expect(FakeWorker.all.every((w) => w.terminated)).toBe(true);
+    expect(FakeWorker.all.every(released)).toBe(true);
     expectSame(serial!, par);
   }, 180_000);
 

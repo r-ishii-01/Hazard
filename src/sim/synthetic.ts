@@ -3,7 +3,7 @@
  * src/terrain に依存せず、ソルバ単体を検証するために使う。
  */
 import { CELL_LAND, CELL_SEA, type TerrainGrid } from '../core/types';
-import { cellCenter, createGridSpec, DOMAIN_BOUNDS, type GridSpec, type Resolution } from '../core/geo';
+import { cellCenter, createGridSpec, DOMAIN_BOUNDS, type GridSpec, type LonLatBounds, type Resolution } from '../core/geo';
 
 export interface SimpleGridOptions {
   nx: number;
@@ -47,7 +47,7 @@ export function makeSimpleGrid(o: SimpleGridOptions): TerrainGrid {
 
 export interface KugenumaLikeOptions {
   resolution?: Resolution;
-  bounds?: { west: number; east: number; south: number; north: number };
+  bounds?: LonLatBounds;
   /** 汀線の緯度 */
   shoreLat?: number;
   /** 沖方向の海底勾配（1/x の x） */
@@ -70,8 +70,7 @@ export interface KugenumaLikeOptions {
  * 鵠沼海岸に似せた合成地形（実在の位置の格子上に、単純な海底勾配・砂浜・砂丘・平地・島・川を置く）。
  */
 export function makeKugenumaLikeGrid(o: KugenumaLikeOptions = {}): TerrainGrid {
-  // createGridSpec の引数型は DOMAIN_BOUNDS のリテラル型なので、同じ形のオブジェクトとして渡す
-  const spec = createGridSpec(o.resolution ?? 'standard', (o.bounds ?? DOMAIN_BOUNDS) as typeof DOMAIN_BOUNDS);
+  const spec = createGridSpec(o.resolution ?? 'standard', o.bounds ?? DOMAIN_BOUNDS);
   const shoreLat = o.shoreLat ?? 35.3125;
   const mPerDegLat = 110950;
   const mPerDegLon = 90800;

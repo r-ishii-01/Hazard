@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QuakeScenario, SimParams, TerrainGrid } from '../src/core/types';
-import { runEngine, type CalibrationInfo, type EngineStartInfo, type StatsSnapshot } from '../src/sim/engine';
+import { prepareRun, runEngine, runSerialMain, type CalibrationInfo, type EngineSink, type EngineStartInfo, type StatsSnapshot } from '../src/sim/engine';
 import { makeKugenumaLikeGrid } from '../src/sim/synthetic';
 
 function scenario(p: Partial<QuakeScenario>): QuakeScenario {
@@ -183,5 +183,99 @@ describe('エンジン: 校正と出力', () => {
   it('地形データの大きさが合わなければ日本語のエラー', () => {
     const bad = { ...grid, z: new Float32Array(10) };
     expect(() => run(bad, params(scenario({})))).toThrow(/地形データ/);
+  });
+});
+
+describe('エンジン: 数値的な頑健性（極端な条件でも発散・NaN なし）', () => {
+  const grid = coast();
+
+  /** 本計算まで実行し、ソルバの最終状態も調べる */
+  function runChecked(g: TerrainGrid, p: SimParams) {
+    let cal: CalibrationInfo | null = null;
+    let stats: StatsSnapshot | null = null;
+    const gauge: number[] = [];
+    let frames = 0;
+    const sink: EngineSink = {
+      start() {},
+      frame: (_i, _d, _gt, ge) => {
+        frames++;
+        gauge.push(...ge);
+      },
+      calibrated: (c) => (cal = c),
+      stats: (s) => (stats = s),
+      progress() {},
+    };
+    const prep = prepareRun({ spec: g.spec, z: g.z, kind: g.kind, manning: g.manning, params: p }, sink);
+    runSerialMain(prep, sink);
+    const { solver } = prep;
+    for (let k = 0; k < solver.n; k++) {
+      expect(Number.isFinite(solver.eta[k])).toBe(true);
+      expect(solver.eta[k]).toBeGreaterThanOrEqual(solver.z[k]);
+    }
+    for (let f = 0; f < solver.M.length; f++) expect(Number.isFinite(solver.M[f])).toBe(true);
+    for (let f = 0; f < solver.N.length; f++) expect(Number.isFinite(solver.N[f])).toBe(true);
+    const st = stats! as StatsSnapshot;
+    for (let k = 0; k < st.maxDepth.length; k++) {
+      expect(st.maxDepth[k]).toBeGreaterThanOrEqual(0);
+      expect(Number.isFinite(st.maxDepth[k])).toBe(true);
+      expect(st.arrival[k] >= 0).toBe(true); // 有限の時刻か +∞（NaN なし）
+    }
+    expect(gauge.every(Number.isFinite)).toBe(true);
+    expect(frames).toBe(Math.round((p.durationMin * 60) / 20) + 1);
+    return { cal: cal! as CalibrationInfo, stats: st };
+  }
+
+  it('海岸で 20 m の巨大な津波: 発散せず、届かない場合は振幅の制限を注記し、同じ試算を繰り返さない', () => {
+    const r = runChecked(grid, params(scenario({ coastHeight: 20, arrivalMin: 10, periodMin: 10 }), { durationMin: 25 }));
+    const amps = r.cal.trials.filter((t) => t.cellM > 40 === false).map((t) => t.amplitude);
+    for (let i = 1; i < amps.length; i++) expect(Math.abs(amps[i] - amps[i - 1])).toBeGreaterThan(1e-6 * amps[i]);
+    expect(r.stats.achievedCoastMax).toBeGreaterThan(10);
+    if (Math.abs(r.stats.achievedCoastMax - 20) / 20 > 0.1) expect(r.cal.notes.some((n) => n.includes('振幅を制限'))).toBe(true);
+    expect(r.stats.maxDepth.some((d) => d > 5)).toBe(true);
+  }, 120_000);
+
+  it('0.3 m の小さな津波（潮位 T.P.0）でも目標どおりに校正される', () => {
+    const r = runChecked(grid, params(scenario({ coastHeight: 0.3, arrivalMin: 10, periodMin: 8 }), { durationMin: 20 }));
+    expect(r.cal.boundaryAmplitude).toBeGreaterThan(0);
+    expect(Math.abs(r.stats.achievedCoastMax - 0.3) / 0.3).toBeLessThan(0.1);
+  }, 120_000);
+
+  it('潮位 T.P.+1 m では、潮位からの上昇量で校正し、潮位で冠水する土地は浸水に数えない', () => {
+    const r = runChecked(grid, params(scenario({ coastHeight: 4, arrivalMin: 10, periodMin: 8 }), { tideTP: 1, durationMin: 20 }));
+    expect(Math.abs(r.stats.achievedCoastMax - 4) / 3).toBeLessThan(0.1); // 上昇量 3 m に対して ±10%
+    for (let k = 0; k < grid.z.length; k++) {
+      if (grid.kind[k] !== 1 && grid.z[k] < 1) {
+        // 海とつながる潮位以下の砂浜は初めから水域
+        expect(r.stats.arrival[k]).toBe(Infinity);
+        expect(r.stats.maxDepth[k]).toBe(0);
+      }
+    }
+  }, 120_000);
+
+  it('地盤高に NaN / ∞ があっても計算でき、伝播時間の見積もりも壊れない', () => {
+    const bad: TerrainGrid = { ...grid, z: Float32Array.from(grid.z) };
+    const { nx, ny } = grid.spec;
+    // 沖・汀線付近・陸に欠測を混ぜる
+    for (const [i, j, v] of [
+      [Math.floor(nx / 2), ny - 3, NaN],
+      [Math.floor(nx / 3), Math.floor(ny * 0.55), NaN],
+      [Math.floor(nx / 4), 5, Infinity],
+      [Math.floor(nx * 0.7), 10, -Infinity],
+    ] as const)
+      bad.z[j * nx + i] = v;
+    const good = runChecked(grid, params(scenario({ coastHeight: 5, arrivalMin: 10 }), { durationMin: 20 }));
+    const r = runChecked(bad, params(scenario({ coastHeight: 5, arrivalMin: 10 }), { durationMin: 20 }));
+    // 欠測が数セルだけなら、校正（入力開始時刻と振幅）はほとんど変わらない
+    expect(Math.abs(r.cal.boundaryStartSec - good.cal.boundaryStartSec)).toBeLessThan(30);
+    expect(Math.abs(r.stats.achievedCoastMax - 5) / 5).toBeLessThan(0.15);
+  }, 180_000);
+
+  it('シナリオの値が数値でなければ既定値・静かな海で計算する', () => {
+    const r = run(grid, params(scenario({ coastHeight: NaN, periodMin: NaN, waves: NaN, arrivalMin: NaN }), { durationMin: NaN, landManning: NaN }));
+    expect(r.cal.boundaryAmplitude).toBe(0);
+    expect(r.cal.notes.length).toBeGreaterThan(0);
+    expect(r.info.durationSec).toBe(3600);
+    expect(r.frames.length).toBe(181);
+    expect(r.perf.steps).toBe(0);
   });
 });
