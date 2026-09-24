@@ -254,8 +254,12 @@ export interface CursorInfo {
   lat: number;
   /** 地盤高 [m, T.P.]（範囲外は null） */
   ground: number | null;
-  /** 現在時刻の浸水深 [m]（未計算は null） */
+  /** 現在時刻の浸水深 [m]（未計算、または海・河川上では null） */
   depth: number | null;
+  /** カーソル位置のセル種別（'sea' は海・河川） */
+  kind?: 'land' | 'sea';
+  /** 海・河川上での現在時刻の水深 [m]（未計算は undefined） */
+  waterDepth?: number;
 }
 
 export interface AppState {
