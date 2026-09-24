@@ -76,12 +76,15 @@ vec2 ripple(vec2 p, float t, float fw) {
   vec2 g = vec2(0.0);
   vec2 d1 = vec2(0.287, -0.958); float l1 = 23.0;
   vec2 d5 = vec2(0.6, 0.8); float l5 = 41.0;
-  g += d1 * cos(dot(d1, p) * 6.2831 / l1 - t * 1.6) * 0.22 * rippleFade(l1, fw);
-  g += d5 * cos(dot(d5, p) * 6.2831 / l5 - t * 1.2) * 0.2 * rippleFade(l5, fw);
-  // 不規則な細かい波（値ノイズの勾配、2オクターブ）
+  // 風の当たり方のむら（大きなスケールのノイズで波の強さを変える）
+  float patch = 0.45 + 0.9 * vnoise(p / 380.0 + vec2(t * 0.01, 0.0));
+  g += d1 * cos(dot(d1, p) * 6.2831 / l1 - t * 1.6) * 0.1 * rippleFade(l1, fw);
+  g += d5 * cos(dot(d5, p) * 6.2831 / l5 - t * 1.2) * 0.09 * rippleFade(l5, fw);
+  // 不規則な細かい波（値ノイズの勾配、3オクターブ）
+  g += noiseGrad(p / 27.0 + vec2(t * 0.09, -t * 0.07)) * 0.22 * rippleFade(27.0, fw);
   g += noiseGrad(p / 11.0 + vec2(t * 0.21, -t * 0.17)) * 0.2 * rippleFade(11.0, fw);
   g += noiseGrad(p / 4.5 + vec2(-t * 0.37, t * 0.29)) * 0.12 * rippleFade(4.5, fw);
-  return g;
+  return g * patch;
 }
 // 水面の反射・拡散（base: 水の色, 戻り値: 色）
 vec3 shadeWater(vec3 base, vec3 n, vec3 V, vec3 sunDir, vec3 sunColor, vec3 horizon, vec3 zenith, float reflectAmt, out float fres) {

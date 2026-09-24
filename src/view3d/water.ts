@@ -22,8 +22,6 @@ import { CELL_INLAND_WATER, CELL_LAND, CELL_SEA, type SimOutput, type TerrainGri
 import { LIGHT_UNIFORMS, WATER_COMMON } from './environment';
 
 const WET = 0.01;
-/** 上昇速度を求める時間差 [秒]（シミュレーション時間） */
-const RISE_DT = 12;
 
 const WATER_VERT = /* glsl */ `
 #include <common>
@@ -103,7 +101,11 @@ void main() {
   // 白波: 浅く急に水位が上がっているところ・浸水の先端・波打ち際
   float nz = vnoise(vXZ * 0.09 + vec2(uTime * 0.35, -uTime * 0.2)) * 0.6 + vnoise(vXZ * 0.31 - uTime * 0.5) * 0.4;
   float rise = max(vRise, 0.0);
-  float foamAmt = clamp(rise * uFoamGain, 0.0, 1.0) * (1.0 - smoothstep(1.0, 7.0, d));
+  // 水位が上がっている所はやや明るく、下がっている所はやや暗く（波の山・谷の動きが見えるように）
+  col += vec3(0.035, 0.06, 0.055) * clamp(rise * 30.0, 0.0, 1.0) * (1.0 - land);
+  col *= 1.0 - 0.14 * clamp(-vRise * 30.0, 0.0, 1.0);
+  // 砕ける津波の先端: 浅い所ほど白波が立ちやすい
+  float foamAmt = clamp(rise * uFoamGain, 0.0, 1.0) * (1.0 - smoothstep(4.0, 22.0, d));
   foamAmt += land * (1.0 - smoothstep(0.03, 0.45, d)) * smoothstep(0.0005, 0.01, rise) * 0.9;
   foamAmt += (1.0 - land) * (1.0 - smoothstep(0.05, 1.1, d)) * (0.45 + 0.25 * sin(uTime * 1.3 + vXZ.y * 0.12 + vXZ.x * 0.01));
   float foam = smoothstep(0.35, 0.8, foamAmt * (0.45 + 0.75 * nz));
@@ -126,8 +128,18 @@ export class WaterLayer {
   private wAttr: BufferAttribute | null = null;
   private depth = new Float32Array(0);
   private prev = new Float32Array(0);
-  private surf = new Float32Array(0);
-  private wet = new Uint8Array(0);
+  /** 時刻をはさむ2フレームの全水深 */
+  private fa = new Float32Array(0);
+  private fb = new Float32Array(0);
+  private bracket = '';
+  private bracketOutput: SimOutput | null = null;
+  private wetW = new Float32Array(0);
+  private wetS = new Float32Array(0);
+  /** 処理対象のセル（0: 対象外, 1: 周辺, 2: 水に関わる） */
+  private mask = new Uint8Array(0);
+  private maskFor: SimOutput | 'still' | null = null;
+  private maskBracket = '';
+  private active = new Int32Array(0);
   /** 計算範囲の境界（海側）の平均水位 [m, T.P.]（範囲外の海の高さに使う） */
   edgeEta = 0;
   /** 最後に描いた状態（同じなら再計算しない） */
@@ -181,8 +193,16 @@ export class WaterLayer {
     }
     this.depth = new Float32Array(n);
     this.prev = new Float32Array(n);
-    this.surf = new Float32Array(n);
-    this.wet = new Uint8Array(n);
+    this.fa = new Float32Array(n);
+    this.fb = new Float32Array(n);
+    this.wetW = new Float32Array(n);
+    this.wetS = new Float32Array(n);
+    this.mask = new Uint8Array(n);
+    this.maskFor = null;
+    this.maskBracket = '';
+    this.active = new Int32Array(0);
+    this.bracket = '';
+    this.bracketOutput = null;
     const geo = new BufferGeometry();
     geo.setAttribute('position', new BufferAttribute(pos, 3));
     this.wAttr = new BufferAttribute(new Float32Array(n * 4), 4);
@@ -200,6 +220,9 @@ export class WaterLayer {
   /**
    * 水面を更新。output が null なら潮位 tide の静かな海。
    * 戻り値: 実際に更新したら true
+   *
+   * 計算結果はフレーム間の線形補間（SimOutput の契約）なので、時刻をはさむ2フレームだけを
+   * fillDepth で取り出して保持し、毎フレームの補間と上昇速度はここで計算する。
    */
   update(output: SimOutput | null, t: number, tide: number, runKey: string): boolean {
     const grid = this.grid;
@@ -212,86 +235,200 @@ export class WaterLayer {
     const z = grid.z;
     const kind = grid.kind;
     const D = this.depth;
-    const P = this.prev;
-    let dt = 0;
+    const R = this.prev; // 上昇速度 [m/s]
     if (output) {
-      const tr = Math.min(t, output.timeReady());
-      output.fillDepth(tr, D);
-      const t0 = Math.max(0, tr - RISE_DT);
-      dt = tr - t0;
-      if (dt > 0) output.fillDepth(t0, P);
+      const fi = output.frameInterval > 0 ? output.frameInterval : 1;
+      const ready = Math.max(1, output.framesReady());
+      const tr = Math.max(0, Math.min(t, output.timeReady()));
+      let i0 = Math.floor(tr / fi + 1e-9);
+      let i1 = i0 + 1;
+      if (i1 > ready - 1) {
+        i1 = ready - 1;
+        i0 = Math.max(0, i1 - 1);
+      }
+      const bk = `${runKey}|${i0}|${i1}`;
+      if (bk !== this.bracket || output !== this.bracketOutput) {
+        output.fillDepth(i0 * fi, this.fa);
+        if (i1 !== i0) output.fillDepth(i1 * fi, this.fb);
+        else this.fb.set(this.fa);
+        this.bracket = bk;
+        this.bracketOutput = output;
+      }
+      const f = i1 > i0 ? Math.min(1, Math.max(0, (tr - i0 * fi) / fi)) : 0;
+      const inv = i1 > i0 ? 1 / fi : 0;
+      const A = this.fa;
+      const B = this.fb;
+      for (let k = 0; k < n; k++) {
+        const a = A[k];
+        const d = B[k] - a;
+        D[k] = a + d * f;
+        R[k] = d * inv;
+      }
     } else {
-      for (let k = 0; k < n; k++) D[k] = kind[k] === CELL_SEA ? Math.max(0, tide - z[k]) : 0;
+      for (let k = 0; k < n; k++) {
+        D[k] = kind[k] === CELL_SEA ? Math.max(0, tide - z[k]) : 0;
+        R[k] = 0;
+      }
     }
-    const surf = this.surf;
-    const wet = this.wet;
-    for (let k = 0; k < n; k++) {
+    // 水に関わりうるセル（海・内水面・これまでに濡れたセルとその周り）だけを処理する
+    const list = this.activeCells(output, D);
+    const W = this.wetW;
+    const S = this.wetS;
+    const m = list.length;
+    for (let q = 0; q < m; q++) {
+      const k = list[q];
       const d = D[k];
-      if (d >= WET && Number.isFinite(d)) {
-        wet[k] = 1;
-        surf[k] = z[k] + d;
+      if (d >= WET && d < 1e4) {
+        W[k] = 1;
+        S[k] = z[k] + d;
       } else {
-        wet[k] = 0;
+        W[k] = 0;
+        S[k] = 0;
       }
     }
     const a = this.wAttr.array as Float32Array;
     let edgeSum = 0;
     let edgeCnt = 0;
-    for (let j = 0; j < ny; j++) {
-      for (let i = 0; i < nx; i++) {
-        const k = j * nx + i;
-        const o = k * 4;
-        if (wet[k]) {
-          a[o] = surf[k];
-          a[o + 1] = D[k];
-          a[o + 2] = 1;
-          a[o + 3] = dt > 0 ? (D[k] - P[k]) / dt : 0;
-          if ((j === ny - 1 || i === 0 || i === nx - 1) && kind[k] === CELL_SEA) {
-            edgeSum += surf[k];
-            edgeCnt += 1;
+    for (let q = 0; q < m; q++) {
+      const k = list[q];
+      const o = k * 4;
+      const j = (k / nx) | 0;
+      const i = k - j * nx;
+      if (W[k] > 0) {
+        const sk = S[k];
+        a[o] = sk;
+        a[o + 1] = D[k];
+        a[o + 2] = 1;
+        a[o + 3] = R[k];
+        if ((j === ny - 1 || i === 0 || i === nx - 1) && kind[k] === CELL_SEA) {
+          edgeSum += sk;
+          edgeCnt += 1;
+        }
+        continue;
+      }
+      // 乾いたセル: 8近傍の濡れたセルの平均水位
+      let cnt = 0;
+      let sum = 0;
+      const i0 = i > 0 ? -1 : 0;
+      const i1 = i < nx - 1 ? 1 : 0;
+      for (let dj = j > 0 ? -1 : 0; dj <= (j < ny - 1 ? 1 : 0); dj++) {
+        const rr = k + dj * nx;
+        for (let di = i0; di <= i1; di++) {
+          const kk = rr + di;
+          if (W[kk] > 0) {
+            cnt += 1;
+            sum += S[kk];
           }
-          continue;
         }
-        // 乾いたセル: 隣接する濡れたセルの水位を調べる（8近傍）
-        let sum = 0;
-        let cnt = 0;
-        for (let dj = -1; dj <= 1; dj++) {
-          const jj = j + dj;
-          if (jj < 0 || jj >= ny) continue;
-          for (let di = -1; di <= 1; di++) {
-            const ii = i + di;
-            if ((di === 0 && dj === 0) || ii < 0 || ii >= nx) continue;
-            const kk = jj * nx + ii;
-            if (wet[kk]) {
-              sum += surf[kk];
-              cnt += 1;
-            }
-          }
-        }
-        const zk = z[k];
-        if (kind[k] === CELL_INLAND_WATER) {
-          // 池などの内水面（計算上は陸）: 静かな水面を表示
-          a[o] = zk + 0.05;
-          a[o + 1] = 0.8;
-          a[o + 2] = 1;
-          a[o + 3] = 0;
-        } else if (cnt > 0 && zk >= sum / cnt) {
-          // 水面を平らに延長（地形の下に隠れ、交線が水際になる）
-          a[o] = sum / cnt;
-          a[o + 1] = 0;
-          a[o + 2] = 1;
-          a[o + 3] = 0;
-        } else {
-          a[o] = zk - (cnt > 0 ? 0.05 : 0.6);
-          a[o + 1] = 0;
-          a[o + 2] = 0;
-          a[o + 3] = 0;
-        }
+      }
+      const zk = z[k];
+      if (kind[k] === CELL_INLAND_WATER) {
+        // 池などの内水面（計算上は陸）: 静かな水面を表示
+        a[o] = zk + 0.05;
+        a[o + 1] = 0.8;
+        a[o + 2] = 1;
+        a[o + 3] = 0;
+      } else if (cnt > 0 && zk * cnt >= sum) {
+        // 水面を平らに延長（地形の下に隠れ、交線が水際になる）
+        a[o] = sum / cnt;
+        a[o + 1] = 0;
+        a[o + 2] = 1;
+        a[o + 3] = 0;
+      } else {
+        a[o] = zk - (cnt > 0 ? 0.05 : 0.6);
+        a[o + 1] = 0;
+        a[o + 2] = 0;
+        a[o + 3] = 0;
       }
     }
     this.edgeEta = edgeCnt > 0 ? edgeSum / edgeCnt : tide;
     this.wAttr.needsUpdate = true;
     return true;
+  }
+
+  /**
+   * 処理するセルの一覧。計算結果が変わったら作り直し、同じ計算結果の間は
+   * 「今の2フレームで濡れているセル」とその周りを追加していく（一覧は増える一方）。
+   * 一覧に入っていないセルは常に乾いていて周りも乾いている（非表示のまま）。
+   */
+  private activeCells(output: SimOutput | null, D: Float32Array): Int32Array {
+    const grid = this.grid!;
+    const { nx, ny } = grid.spec;
+    const n = nx * ny;
+    const key = output ? output : 'still';
+    let changed = false;
+    if (key !== this.maskFor) {
+      this.maskFor = key;
+      this.mask.fill(0);
+      this.wetW.fill(0);
+      this.wetS.fill(0);
+      this.maskBracket = '';
+      // いったん全セルを非表示に
+      const a = this.wAttr!.array as Float32Array;
+      const z = grid.z;
+      for (let k = 0; k < n; k++) {
+        const o = k * 4;
+        a[o] = z[k] - 0.6;
+        a[o + 1] = 0;
+        a[o + 2] = 0;
+        a[o + 3] = 0;
+      }
+      const kind = grid.kind;
+      for (let k = 0; k < n; k++) if (kind[k] !== CELL_LAND) this.markAround(k, nx, ny);
+      changed = true;
+    }
+    const mb = output ? this.bracket : 'still';
+    if (mb !== this.maskBracket) {
+      this.maskBracket = mb;
+      const mask = this.mask;
+      if (output) {
+        const A = this.fa;
+        const B = this.fb;
+        const arr = output.arrival;
+        for (let k = 0; k < n; k++) {
+          if (mask[k] === 2) continue;
+          if (A[k] >= WET || B[k] >= WET || (arr && Number.isFinite(arr[k]))) {
+            this.markAround(k, nx, ny);
+            changed = true;
+          }
+        }
+      } else {
+        for (let k = 0; k < n; k++) {
+          if (mask[k] !== 2 && D[k] >= WET) {
+            this.markAround(k, nx, ny);
+            changed = true;
+          }
+        }
+      }
+    }
+    if (changed) {
+      let c = 0;
+      const mask = this.mask;
+      for (let k = 0; k < n; k++) if (mask[k]) c++;
+      const list = new Int32Array(c);
+      c = 0;
+      for (let k = 0; k < n; k++) if (mask[k]) list[c++] = k;
+      this.active = list;
+    }
+    return this.active;
+  }
+
+  /** セル k を「中心」(2)、周り8セルを「周辺」(1 以上) として登録 */
+  private markAround(k: number, nx: number, ny: number): void {
+    const mask = this.mask;
+    mask[k] = 2;
+    const j = (k / nx) | 0;
+    const i = k - j * nx;
+    for (let dj = -1; dj <= 1; dj++) {
+      const jj = j + dj;
+      if (jj < 0 || jj >= ny) continue;
+      for (let di = -1; di <= 1; di++) {
+        const ii = i + di;
+        if (ii < 0 || ii >= nx) continue;
+        const kk = jj * nx + ii;
+        if (mask[kk] === 0) mask[kk] = 1;
+      }
+    }
   }
 
   /** 強制的に次回更新させる */
@@ -307,6 +444,8 @@ export class WaterLayer {
       this.mesh = null;
     }
     this.wAttr = null;
+    this.bracketOutput = null;
+    this.maskFor = null;
   }
 
   dispose(): void {

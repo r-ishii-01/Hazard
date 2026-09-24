@@ -43,6 +43,16 @@ export const STATUS_LABELS: Record<PersonStatus, string> = {
   critical: PERSON_STATUS_INFO.critical?.label ?? '生命の危険',
 };
 
+/** 小さいラベル用の短い状態名 */
+const STATUS_SHORT: Record<PersonStatus, string> = {
+  waiting: '開始前',
+  evacuating: '避難中',
+  safe: '避難完了',
+  caution: '注意',
+  danger: '危険',
+  critical: '生命の危険',
+};
+
 const ROUTE_VERT = /* glsl */ `
 attribute vec3 aPerp;
 attribute float aDist;
@@ -134,7 +144,7 @@ export class PeopleLayer {
   readonly routes = new Group();
   private readonly geos = new Map<PersonKind, { geometry: BufferGeometry; height: number }>();
   private readonly bodyMat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.62, metalness: 0 });
-  private readonly bodySelMat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.5, metalness: 0, emissive: new Color('#fde68a'), emissiveIntensity: 0.35 });
+  private readonly bodySelMat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.5, metalness: 0, emissive: new Color('#ffffff'), emissiveIntensity: 0.12 });
   private readonly ringGeo = new RingGeometry(0.42, 0.66, 40).rotateX(-Math.PI / 2);
   private readonly selGeo = new RingGeometry(0.78, 0.94, 48).rotateX(-Math.PI / 2);
   private readonly selMat = new MeshBasicMaterial({ color: '#facc15', transparent: true, opacity: 0.95, depthTest: false, depthWrite: false });
@@ -392,7 +402,9 @@ export class PeopleLayer {
       const statusText = STATUS_LABELS[st.status] ?? st.status;
       e.label.set({
         title: e.person.name,
-        line2: selected ? `${statusText}・${depthText}` : depth > 0 ? depthText : statusText,
+        line2: selected
+          ? `${statusText}・${depthText}`
+          : `${STATUS_SHORT[st.status] ?? statusText}${depth > 0 ? `・${depth < 0.1 ? depth.toFixed(2) : depth.toFixed(1)}m` : ''}`,
         accent: STATUS_COLORS[st.status] ?? STATUS_COLORS.waiting,
         selected,
         compact: !selected,

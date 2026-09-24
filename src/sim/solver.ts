@@ -167,11 +167,11 @@ export class ShallowWaterSolver {
   statsEvery = 4;
 
   /** 地盤高 [m, T.P.] */
-  readonly z: Float32Array;
+  readonly z: Float64Array;
   /** 水位 [m, T.P.]（乾燥セルでは z とほぼ等しい） */
-  readonly eta: Float32Array;
+  readonly eta: Float64Array;
   /** セルのマニング粗度の2乗 */
-  readonly nsq: Float32Array;
+  readonly nsq: Float64Array;
   /** 陸セル（= 初期に乾燥しているセル）なら 1 */
   readonly isLand: Uint8Array;
   /** 最大水位（一度も濡れていないセルは −∞） */
@@ -181,10 +181,10 @@ export class ShallowWaterSolver {
   /** 浸水開始時刻 [秒]（陸: 未浸水 +∞、陸以外: −∞） */
   readonly arrival: Float32Array;
 
-  private m0: Float32Array;
-  private m1: Float32Array;
-  private n0: Float32Array;
-  private n1: Float32Array;
+  private m0: Float64Array;
+  private m1: Float64Array;
+  private n0: Float64Array;
+  private n1: Float64Array;
   private readonly uCap: number;
 
   // ---- 計算範囲（一度でも濡れたブロックの近傍だけを計算する。範囲は単調に広がる） ----
@@ -239,11 +239,11 @@ export class ShallowWaterSolver {
     this.t = opts.t0 ?? 0;
     this.incident = opts.incident ?? null;
     this.uCap = opts.velocityCap ?? VELOCITY_CAP;
-    const tide = Math.fround(opts.tide);
+    const tide = opts.tide;
 
-    this.z = new Float32Array(n);
-    this.eta = new Float32Array(n);
-    this.nsq = new Float32Array(n);
+    this.z = new Float64Array(n);
+    this.eta = new Float64Array(n);
+    this.nsq = new Float64Array(n);
     this.isLand = new Uint8Array(n);
     this.maxEta = new Float32Array(n);
     this.maxDepth = new Float32Array(n);
@@ -260,7 +260,6 @@ export class ShallowWaterSolver {
     for (let k = 0; k < n; k++) {
       let zk = Number(grid.z[k]);
       if (!Number.isFinite(zk)) zk = 0;
-      zk = Math.fround(zk);
       this.z[k] = zk;
       const land = grid.kind[k] !== CELL_SEA;
       this.isLand[k] = land ? 1 : 0;
@@ -284,10 +283,10 @@ export class ShallowWaterSolver {
     this.dirtyHi = ny - 1;
     this.rebuildRuns();
 
-    this.m0 = new Float32Array((nx + 1) * ny);
-    this.m1 = new Float32Array((nx + 1) * ny);
-    this.n0 = new Float32Array(nx * (ny + 1));
-    this.n1 = new Float32Array(nx * (ny + 1));
+    this.m0 = new Float64Array((nx + 1) * ny);
+    this.m1 = new Float64Array((nx + 1) * ny);
+    this.n0 = new Float64Array(nx * (ny + 1));
+    this.n1 = new Float64Array(nx * (ny + 1));
     this.bDfM = new Float64Array(3 * (nx + 1));
     this.bFM = new Float64Array(3 * (nx + 1));
     this.bGM = new Float64Array(3 * (nx + 1));
@@ -367,11 +366,11 @@ export class ShallowWaterSolver {
   }
 
   /** 現在の東西方向の線流量（面 j*(nx+1)+i、東向き正） */
-  get M(): Float32Array {
+  get M(): Float64Array {
     return this.m0;
   }
   /** 現在の南北方向の線流量（面 j*nx+i、南向き正） */
-  get N(): Float32Array {
+  get N(): Float64Array {
     return this.n0;
   }
   /** 開境界の面の数 */
@@ -799,7 +798,7 @@ export class ShallowWaterSolver {
         if (out > 0) {
           const avail = (eta[k] - z[k]) * cap;
           if (out > avail) {
-            // 単精度への丸めで超えないよう、わずかに小さめに縮小する
+            // 丸め誤差で保有量を超えないよう、わずかに小さめに縮小する
             const s = avail > 0 ? (avail / out) * (1 - 1e-6) : 0;
             if (me > 0) m1[fw + 1] = me * s;
             if (mw < 0) m1[fw] = mw * s;

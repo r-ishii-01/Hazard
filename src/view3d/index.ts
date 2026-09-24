@@ -186,7 +186,7 @@ export class View3D {
     r.toneMapping = ACESFilmicToneMapping;
     r.toneMappingExposure = 1.05;
     r.setClearColor(0xcfdfea, 1);
-    r.domElement.setAttribute('aria-label', '3Dビュー（ドラッグで回転、右ドラッグで移動、ホイールで拡大縮小）');
+    r.domElement.setAttribute('aria-label', '3Dビュー（ドラッグで回転、右ドラッグまたは矢印キーで移動、ホイールで拡大縮小）');
     r.domElement.tabIndex = 0;
     this.overlay.mountCanvas(r.domElement);
 
@@ -209,6 +209,9 @@ export class View3D {
     c.rotateSpeed = 0.6;
     c.zoomSpeed = 1.1;
     c.panSpeed = 1.0;
+    c.keyPanSpeed = 25;
+    // キーボード（矢印キー）での移動。キャンバスにフォーカスがあるときだけ
+    c.listenToKeyEvents(r.domElement);
     c.addEventListener('start', () => {
       this.interacting = true;
       this.camAnim = null;
