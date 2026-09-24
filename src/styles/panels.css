@@ -576,7 +576,13 @@ details.scenario-notes ul {
 
 .run-progress {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* 長い進み具合のメッセージ（折り返さない）で中止ボタンがはみ出さないように */
+.run-progress > * {
   min-width: 0;
 }
 
@@ -595,9 +601,11 @@ details.scenario-notes ul {
 .run-msg {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  /* 計算側のメッセージ（例:「計算中… 地震発生から 12分（3並列）」）を省略せずに折り返す */
+  line-height: 1.4;
+  /* メッセージ中の空白で折り返す（「（3並列）」の途中で切らない） */
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
 .run-pct {

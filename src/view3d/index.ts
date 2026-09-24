@@ -10,9 +10,12 @@
  */
 import {
   ACESFilmicToneMapping,
+  DataTexture,
   Group,
   MathUtils,
+  NearestFilter,
   PerspectiveCamera,
+  RGBAFormat,
   Raycaster,
   SRGBColorSpace,
   Scene,
@@ -45,6 +48,7 @@ import { ShelterLayer } from './shelters';
 import { TerrainLayer } from './terrain';
 import { TileCanvas } from './tileCanvas';
 import { WaterLayer } from './water';
+import { hazardTileMayExist } from '../map2d/hazardTiles';
 
 /** 初期視点: 沖合の南南西から、仰角 約45° で鵠沼海岸を見る */
 const INITIAL_AZIMUTH_DEG = 202;
@@ -141,6 +145,8 @@ export class View3D {
   private overlayTime = 0;
   private peopleDirty = true;
   private sheltersDirty = true;
+  /** 建物に付ける色分けのテクスチャ（最大浸水深・到達時間） */
+  private overlayTex: DataTexture | null = null;
 
   constructor(container: HTMLElement, store: AppStore, actions: AppActions) {
     this.container = container;
@@ -284,6 +290,7 @@ export class View3D {
     this.basemapTiles?.dispose();
     this.reliefTiles?.dispose();
     this.hazardTiles?.dispose();
+    this.overlayTex?.dispose();
     this.buildings.dispose();
     this.people.dispose();
     this.shelters.dispose();
@@ -429,17 +436,21 @@ export class View3D {
     if (hazardOn !== seen.hazardOn) {
       seen.hazardOn = hazardOn;
       this.hazardTiles?.dispose();
-      this.hazardTiles = hazardOn && grid ? this.createTiles(grid, HAZARD_TSUNAMI_TILES, 16) : null;
+      // 公式の浸水想定はズーム15（約4.8 m/画素）で十分（地形のセルは約8〜31 m）。存在しないタイルは要求しない
+      this.hazardTiles = hazardOn && grid ? this.createTiles(grid, HAZARD_TSUNAMI_TILES, 15, (x, y, z) => hazardTileMayExist(z, x, y)) : null;
       seen.hazardOpacity = -1;
       seen.attribution = '';
       this.touch();
     }
     if (hazardOn && s.layers.officialHazardOpacity !== seen.hazardOpacity) {
       seen.hazardOpacity = s.layers.officialHazardOpacity;
-      this.terrain.setHazard(this.hazardTiles?.texture ?? null, Math.max(0, Math.min(1, s.layers.officialHazardOpacity)));
+      const op = Math.max(0, Math.min(1, s.layers.officialHazardOpacity));
+      this.terrain.setHazard(this.hazardTiles?.texture ?? null, op);
+      this.buildings.setHazard(this.hazardTiles?.texture ?? null, op);
       this.touch();
     } else if (!hazardOn) {
       this.terrain.setHazard(null, 0);
+      this.buildings.setHazard(null, 0);
     }
 
     if (s.layers.buildings !== seen.buildingsOn) {
@@ -489,7 +500,9 @@ export class View3D {
       seen.overlayOutput = output;
       seen.overlayFrames = frames;
       this.overlayTime = now;
-      this.terrain.setOverlay(mode !== 'none' && output ? this.overlayColors(grid, output, mode) : null);
+      const colors = mode !== 'none' && output ? this.overlayColors(grid, output, mode) : null;
+      this.terrain.setOverlay(colors);
+      this.buildings.setOverlay(colors ? this.overlayTexture(grid, colors) : null, 0.85);
       this.needsRender = true;
     }
 
@@ -545,7 +558,7 @@ export class View3D {
     if (this.needsRender) this.lastActivity = now;
   }
 
-  private createTiles(grid: TerrainGrid, source: (typeof BASEMAPS)['pale'], maxZoom: number): TileCanvas {
+  private createTiles(grid: TerrainGrid, source: (typeof BASEMAPS)['pale'], maxZoom: number, exists?: (x: number, y: number, z: number) => Promise<boolean>): TileCanvas {
     const r = this.renderer!;
     const spec = grid.spec;
     // 陸のセルを含むタイルだけ取得（海だけのタイルは使わない）
@@ -565,6 +578,7 @@ export class View3D {
       maxZoom,
       anisotropy: Math.min(8, r.capabilities.getMaxAnisotropy()),
       filter: landTile,
+      exists,
       onUpdate: () => {
         this.needsRender = true;
       },
@@ -607,6 +621,24 @@ export class View3D {
       }
     }
     return out;
+  }
+
+  /** 頂点色と同じ色分けを、建物に付けるためのテクスチャにする（グリッドと同じ大きさ・再利用） */
+  private overlayTexture(grid: TerrainGrid, rgba: Uint8ClampedArray): DataTexture {
+    const { nx, ny } = grid.spec;
+    let tex = this.overlayTex;
+    if (!tex || tex.image.width !== nx || tex.image.height !== ny) {
+      tex?.dispose();
+      tex = new DataTexture(new Uint8Array(nx * ny * 4), nx, ny, RGBAFormat);
+      tex.colorSpace = SRGBColorSpace;
+      tex.flipY = false;
+      tex.magFilter = NearestFilter;
+      tex.minFilter = NearestFilter;
+      this.overlayTex = tex;
+    }
+    (tex.image.data as Uint8Array).set(rgba);
+    tex.needsUpdate = true;
+    return tex;
   }
 
   private attributionHtml(s: AppState): string {

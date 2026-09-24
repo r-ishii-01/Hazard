@@ -48,6 +48,11 @@ export function createInfoPanel(ctx: UIContext): HTMLElement {
         'div',
         { class: 'legend-hazard-note' },
         h('p', null, h('strong', null, '公式の津波浸水想定（レイヤー「公式ハザードマップ」）: '), HAZARD_TSUNAMI_TILES.notes ?? ''),
+        h(
+          'p',
+          null,
+          'レイヤー「最大浸水深」と重ねると、このサイトの計算と見比べられます。公式の想定は5つの地震の結果の最大を重ね合わせたものなので、1つのシナリオだけを計算した結果より広く・深くなるのがふつうです。',
+        ),
         h('p', { class: 'hazard-notice' }, icon('alert', 14), h('span', null, HAZARD_PORTAL_NOTICE)),
         h('p', { class: 'source-note' }, '出典: ', safeAttributionHTML(HAZARD_TSUNAMI_TILES.attribution)),
       ),

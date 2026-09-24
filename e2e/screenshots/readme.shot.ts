@@ -1,7 +1,9 @@
 /**
  * README 用のスクリーンショット（e2e/screenshots.config.ts で実行: `npm run screenshots`）。
- * 実際の地理院タイルなどを読み込み、相模トラフ西側モデル（震度7）を「標準」解像度で計算して撮影する。
+ * 実際の地理院タイルなどを読み込み、相模トラフ西側モデル（震度7）を「標準」解像度・30 分で計算して撮影する。
  * 保存先: docs/screenshots/*.jpg（JPEG 品質 80 前後。1 枚あたり 400 KB 程度以下に収める）
+ *   2d-inundation.jpg（2D の浸水）・hazard-overlay.jpg（公式ハザードマップ）・person-panel.jpg（人物の評価）・
+ *   3d-view.jpg（3D）・mobile-map.jpg / mobile-sheet.jpg（スマートフォン）
  */
 import { mkdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -160,26 +162,52 @@ test.describe('デスクトップ', () => {
     const ids = await placePeople(page);
     const tBest = await runSimulation(page);
 
-    // (1) 2D の浸水（最も広く浸水している時刻）。結果の要約が見えるよう「条件を調整する」を閉じる
+    // (1) 2D の浸水（最も広く浸水している時刻）。辻堂〜江の島が入るよう少し引いて表示し、
+    //     結果の要約が見えるよう「条件を調整する」を閉じる
     await page.evaluate((t) => {
       window.__app.actions.pause();
       window.__app.actions.seek(t);
+      window.__map2d?.map.jumpTo({ center: [139.462, 35.3125], zoom: 13.45 });
     }, tBest);
     await page.locator('#panel-quake details.section-details > summary').click();
     await page.locator('#panel-quake .results').scrollIntoViewIfNeeded();
     await waitForMapIdle(page);
     await shoot(page, '2d-inundation.jpg');
 
-    // (2) 人物の評価（高齢者を選択。浸水深のグラフと避難の見通し）
+    // (2) 公式ハザードマップ（神奈川県の津波浸水想定）を重ねた表示（計算の浸水は消す）
+    await page.evaluate(() => {
+      const { actions } = window.__app;
+      actions.setLayer('simFlood', false);
+      actions.setLayer('officialHazard', true);
+    });
+    await page.getByRole('tab', { name: 'レイヤー' }).click();
+    await waitForMapIdle(page);
+    await shoot(page, 'hazard-overlay.jpg');
+    await page.evaluate(() => {
+      const { actions } = window.__app;
+      actions.setLayer('officialHazard', false);
+      actions.setLayer('simFlood', true);
+    });
+
+    // (3) 人物の評価（海岸近くの高齢者を選択。避難の見通しと浸水深のグラフ）
     await page.getByRole('tab', { name: '人物' }).click();
-    await page.evaluate((id) => window.__app.actions.selectPerson(id), ids[0]);
-    await page.evaluate((t) => window.__app.actions.seek(t), Math.min(tBest, 11 * 60));
-    await page.locator('#panel-people .person-detail').scrollIntoViewIfNeeded();
+    await page.evaluate(
+      ({ id, t }) => {
+        window.__app.actions.selectPerson(id);
+        window.__app.actions.seek(t);
+        window.__map2d?.map.jumpTo({ center: [139.4705, 35.3135], zoom: 14.3 });
+      },
+      { id: ids[0], t: Math.min(tBest, 11 * 60) },
+    );
     await page.waitForTimeout(1500);
+    await page.evaluate(() => {
+      const title = [...document.querySelectorAll('#panel-people .person-detail .group-title')].find((el) => el.textContent?.includes('避難の見通し'));
+      title?.scrollIntoView({ block: 'start' });
+    });
     await waitForMapIdle(page);
     await shoot(page, 'person-panel.jpg');
 
-    // (3) 3D（写真の背景地図・建物）
+    // (4) 3D（写真の背景地図・建物）
     await page.evaluate((t) => {
       window.__app.actions.selectPerson(null);
       window.__app.actions.seek(t);
@@ -201,7 +229,13 @@ test.describe('スマートフォン', () => {
     await page.evaluate((t) => {
       window.__app.actions.pause();
       window.__app.actions.seek(t);
+      window.__map2d?.map.jumpTo({ center: [139.4685, 35.3135], zoom: 13.7 });
     }, tBest);
+    // 出典の表示（MapLibre の折りたたみ式の出典）が地図を大きく覆う場合は閉じる（出典は README に記載）
+    await page.evaluate(() => {
+      const attrib = document.querySelector('.maplibregl-ctrl-attrib.maplibregl-compact-show');
+      (attrib?.querySelector('.maplibregl-ctrl-attrib-button') as HTMLElement | null)?.click();
+    });
     await waitForMapIdle(page);
     await shoot(page, 'mobile-map.jpg', 78);
 

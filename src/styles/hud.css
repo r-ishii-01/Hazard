@@ -15,7 +15,8 @@
 }
 
 .hud-bc {
-  bottom: 36px;
+  /* 右下の出典（2行になることがある）・左下の縮尺の上に出す */
+  bottom: 56px;
   left: 50%;
   align-items: center;
   width: max-content;
@@ -180,6 +181,8 @@
 
 .hud-chip-text {
   min-width: 0;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
 .hud-chip-btn {
@@ -427,7 +430,8 @@
   }
 
   .hud-bc {
-    bottom: var(--sp-2);
+    /* 左下の縮尺・右下の出典ボタン（2D）、倍率の注記・出典（3D）の上に出す */
+    bottom: 34px;
     left: var(--sp-2);
     right: var(--sp-2);
     width: auto;
@@ -438,6 +442,11 @@
 
   .hud-bc .hud-chip {
     max-width: 100%;
+  }
+
+  /* 狭い画面では進み具合の数値だけを出す（棒は計算タブと重複） */
+  .hud-bc .progress-inline {
+    display: none;
   }
 
   .hud-legend {

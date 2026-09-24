@@ -96,7 +96,7 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
     'div',
     { class: 'placing-hint', role: 'status' },
     icon('pin', 16),
-    h('span', null, '地図をクリックして配置（Escで終了）'),
+    h('span', null, '地図をクリックして配置', h('span', { style: { whiteSpace: 'nowrap' } }, '（Escで終了）')),
     h('button', { type: 'button', class: 'btn btn-ghost btn-sm', onclick: () => actions.startPlacing(null) }, '終了'),
   );
   ctx.scope.add(

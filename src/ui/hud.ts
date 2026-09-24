@@ -358,23 +358,28 @@ function createHudLegend(ctx: UIContext): HTMLElement {
     const L = s.layers;
     const out = !!s.sim.output;
     const hazard = L.officialHazard;
-    const simDepth = out && (L.simFlood || L.maxDepth);
-    const arrival = out && L.arrival;
+    const is2d = s.view === '2d';
+    // 3D の「浸水（現在時刻）」は色分けでなく水面として描くので、浸水深の色分けは最大浸水深のときだけ。
+    // 3D の地形の色分けは最大浸水深と到達時間のどちらか一方（最大浸水深が優先）
+    const floodColored = out && L.simFlood && is2d;
+    const maxColored = out && L.maxDepth;
+    const simDepth = floodColored || maxColored;
+    const arrival = out && L.arrival && (is2d || !L.maxDepth);
     setHidden(el, !(hazard || simDepth || arrival));
     setHidden(arrivalBlock, !arrival);
     setHidden(depthBlock, !(hazard || simDepth));
     setHidden(hazardNote, !hazard);
     // 海の色分けは 2D 地図の「浸水（現在時刻）」レイヤーのもの（3D は水面として描く）
-    setHidden(seaRows, !(out && L.simFlood && s.view === '2d'));
+    setHidden(seaRows, !floodColored);
     if (hazard && simDepth) {
       setText(depthTitle, '浸水深');
       setText(depthSub, '公式の津波浸水想定と計算結果は同じ色分け');
     } else if (hazard) {
       setText(depthTitle, '津波浸水想定（公式）');
       setText(depthSub, '浸水深（基準水位ではありません）');
-    } else if (L.maxDepth) {
-      setText(depthTitle, L.simFlood ? '浸水深（計算）' : '最大浸水深（計算）');
-      setText(depthSub, L.simFlood ? '現在時刻・最大とも同じ色分け' : '計算した時間内の最大');
+    } else if (maxColored) {
+      setText(depthTitle, floodColored ? '浸水深（計算）' : '最大浸水深（計算）');
+      setText(depthSub, floodColored ? '現在時刻・最大とも同じ色分け' : '計算した時間内の最大');
     } else {
       setText(depthTitle, '浸水深（計算）');
       setText(depthSub, 'タイムラインの時刻');

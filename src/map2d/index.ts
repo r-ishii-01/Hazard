@@ -33,7 +33,7 @@ import { CellCanvas, buildFloodReference, paintArrival, paintFlood, paintMaxDept
 import { IDS, SIM_OPACITY, basemapLayer, basemapLayerId, buildStyle, domainGeoJSON, rasterSource } from './style';
 import { PeopleLayer, type PeopleContext } from './people';
 import { PoiLayer, ShelterLayer, createDomainLabel } from './shelters';
-import { registerHazardProtocol, setHazardMaskGrid } from './hazardTiles';
+import { registerHazardProtocol } from './hazardTiles';
 // MapLibre v6 のワーカーは別ファイル。Vite の事前バンドル／本番ビルドでは既定の相対 URL が解決できないので、
 // Vite にワーカーとしてバンドルさせ、その URL を明示する。
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
@@ -177,7 +177,6 @@ export class MapView2D {
 
     const s = store.get();
     const spec = this.currentSpec(s);
-    setHazardMaskGrid(s.terrain.grid);
     try {
       this.map = new MapLibreMap({
         container: this.root,
@@ -220,6 +219,7 @@ export class MapView2D {
     map.addControl(new ScaleControl({ unit: 'metric', maxWidth: 110 }), 'bottom-left');
     // 各ソースの出典はソースごとに自動表示。主な地点（POI）は OSM 由来の位置を含むので常に表示する
     map.addControl(new AttributionControl({ compact: true, customAttribution: POIS.length ? POI_ATTRIBUTION : undefined }), 'bottom-right');
+    this.collapseAttributionOnNarrow();
 
     map.on('error', this.onMapError);
     // 'load' は表示範囲のタイルが揃うまで待つので、スタイルの準備ができた時点で重ね合わせを始める
@@ -301,7 +301,6 @@ export class MapView2D {
       if (s.layers.simFlood && !p.layers.simFlood) d.flood = true;
       if ((s.layers.maxDepth && !p.layers.maxDepth) || (s.layers.arrival && !p.layers.arrival)) d.growing = true;
     }
-    if (s.terrain.grid !== p.terrain.grid) setHazardMaskGrid(s.terrain.grid);
     if (s.terrain.grid !== p.terrain.grid || s.params.resolution !== p.params.resolution) {
       d.domain = d.flood = d.growing = d.people = d.routes = d.layers = d.attribution = any = true;
     }
@@ -709,6 +708,28 @@ export class MapView2D {
       }
     }
     this.actions.setCursor({ lon: m.lon, lat: m.lat, ground: ground ?? null, depth, kind, waterDepth });
+  }
+
+  /**
+   * 狭い画面（幅 640px 未満）では、出典を最初から折りたたむ（ⓘ ボタンで開ける）。
+   * MapLibre は compact でも最初は開いた状態で表示し、地図を動かすまで閉じないため、長い出典が地図を覆ってしまう。
+   */
+  private collapseAttributionOnNarrow(): void {
+    const el = this.root.querySelector<HTMLElement>('.maplibregl-ctrl-attrib');
+    if (!el || this.root.clientWidth >= 640 || typeof MutationObserver === 'undefined') return;
+    const collapse = () => {
+      if (!el.classList.contains('maplibregl-compact-show')) return false;
+      el.classList.remove('maplibregl-compact-show');
+      el.removeAttribute('open');
+      return true;
+    };
+    if (collapse()) return;
+    // 出典の中身が届いて開かれた時点で1回だけ閉じる
+    const mo = new MutationObserver(() => {
+      if (collapse()) mo.disconnect();
+    });
+    mo.observe(el, { attributes: true, attributeFilter: ['class'] });
+    window.setTimeout(() => mo.disconnect(), 15000);
   }
 
   private onZoom = (): void => {

@@ -16,6 +16,11 @@ const CSS = `
 .v3d-note{position:absolute;left:8px;bottom:6px;z-index:2;font:500 11px/1.35 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#1e293b;background:rgba(255,255,255,.82);border-radius:6px;padding:3px 7px;cursor:help;max-width:60%}
 .v3d-attrib{position:absolute;right:0;bottom:0;z-index:2;font:400 10px/1.4 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#334155;background:rgba(255,255,255,.8);padding:2px 6px;border-top-left-radius:6px;max-width:min(72%,720px);text-align:right}
 .v3d-attrib a{color:inherit;text-decoration:underline;text-decoration-color:rgba(51,65,85,.4)}
+.v3d-attrib-btn{display:none;font:600 11px/1 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#1e293b;background:rgba(255,255,255,.88);border:1px solid rgba(15,23,42,.18);border-radius:999px;padding:5px 9px;cursor:pointer}
+.v3d-attrib-btn:focus-visible{outline:2px solid #0284c7;outline-offset:1px}
+.v3d-root.v3d-narrow .v3d-attrib-btn{display:block;position:absolute;right:6px;bottom:6px;z-index:3}
+.v3d-root.v3d-narrow .v3d-attrib{bottom:34px;right:6px;border-radius:6px;max-width:calc(100% - 12px)}
+.v3d-root.v3d-narrow .v3d-attrib[data-open="0"]{display:none}
 .v3d-msg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2;font:600 13px/1.5 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#0f172a;background:rgba(255,255,255,.9);border-radius:10px;padding:10px 16px;box-shadow:0 2px 10px rgba(15,23,42,.2);pointer-events:none;text-align:center;max-width:80%}
 .v3d-tip{position:absolute;z-index:3;pointer-events:none;font:500 12px/1.45 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#f8fafc;background:rgba(15,23,42,.9);border-radius:6px;padding:5px 8px;white-space:pre-line;max-width:280px;transform:translate(12px,12px)}
 .v3d-root[data-placing="1"] canvas{cursor:crosshair}
@@ -37,6 +42,8 @@ export class Overlay {
   private readonly tip: HTMLDivElement;
   private readonly toastEl: HTMLDivElement;
   private toastTimer = 0;
+  private readonly attribBtn: HTMLButtonElement;
+  private attribOpen = false;
   private attribHtml = '';
   private noteText = '';
 
@@ -86,7 +93,25 @@ export class Overlay {
     this.toastEl.className = 'v3d-toast';
     this.toastEl.setAttribute('role', 'status');
     this.toastEl.setAttribute('aria-live', 'polite');
-    this.root.append(this.tools, this.note, this.attrib, this.msg, this.tip, this.toastEl);
+    // 狭い画面では出典を「出典」ボタンで開閉する（長い出典が 3D 表示を覆わないように）
+    this.attribBtn = document.createElement('button');
+    this.attribBtn.type = 'button';
+    this.attribBtn.className = 'v3d-attrib-btn';
+    this.attribBtn.textContent = '出典';
+    this.attribBtn.setAttribute('aria-expanded', 'false');
+    this.attribBtn.addEventListener('click', () => {
+      this.attribOpen = !this.attribOpen;
+      this.applyAttribOpen();
+      this.layout();
+    });
+    this.applyAttribOpen();
+    this.root.append(this.tools, this.note, this.attrib, this.attribBtn, this.msg, this.tip, this.toastEl);
+  }
+
+  private applyAttribOpen(): void {
+    this.attrib.dataset.open = this.attribOpen ? '1' : '0';
+    this.attribBtn.setAttribute('aria-expanded', String(this.attribOpen));
+    this.attribBtn.textContent = this.attribOpen ? '出典を閉じる' : '出典';
   }
 
   /** 短い通知（数秒で消える） */
@@ -128,6 +153,15 @@ export class Overlay {
   layout(): void {
     const w = this.root.clientWidth;
     if (w === 0) return;
+    const narrow = w < 560;
+    this.root.classList.toggle('v3d-narrow', narrow);
+    if (narrow) {
+      // 出典はボタンで開くので、注記は左下のまま（ボタンと重ならない幅に）
+      this.note.style.bottom = '';
+      this.note.style.maxWidth = 'calc(100% - 90px)';
+      return;
+    }
+    this.note.style.maxWidth = '';
     const aw = this.attrib.offsetWidth;
     const nw = this.note.offsetWidth;
     const overlap = 8 + nw + 8 > w - aw;

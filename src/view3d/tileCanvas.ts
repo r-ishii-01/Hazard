@@ -21,6 +21,8 @@ export interface TileCanvasOptions {
   anisotropy: number;
   /** タイル (x, y, z) を取得するか（海だけのタイルを省く等） */
   filter?: (x: number, y: number, z: number) => boolean;
+  /** 取得の直前に、タイルが存在しうるかを非同期に確かめる（false なら要求せず「無い」扱い。404 を減らす） */
+  exists?: (x: number, y: number, z: number) => Promise<boolean>;
   /** テクスチャが更新された（再描画が必要） */
   onUpdate: () => void;
   /** 最初のタイルを描いた（出典表示の更新用） */
@@ -109,7 +111,9 @@ export class TileCanvas {
       const t = queue.shift()!;
       active += 1;
       const url = source.url.replace('{z}', String(this.zoom)).replace('{x}', String(t.x)).replace('{y}', String(t.y));
-      this.loadTile(url)
+      const exists = this.opts.exists;
+      (exists ? exists(t.x, t.y, this.zoom).catch(() => true) : Promise.resolve(true))
+        .then((ok) => (ok && !this.disposed ? this.loadTile(url) : null))
         .then((bmp) => {
           if (this.disposed) {
             bmp?.close();

@@ -6,6 +6,8 @@
  * - 各ポリゴンはタイル境界で切り取り（隣のタイルとの重複を防ぐ）、角柱に押し出す
  * - 足元は地形の標高（外周の最小値）に合わせる。鉛直強調はワールドグループが掛ける
  * - タイル1枚ごとに1つのメッシュ（読み込みながら順に表示）
+ * - 最大浸水深・到達時間・公式の浸水想定を地形に重ねるときは、建物にも足元の色を付ける
+ *   （斜めから見ると地面の多くが建物に隠れ、色分けが読み取れないため）
  * 取得できないときは静かに諦める（console.info を1回だけ）。
  */
 import { VectorTile, classifyRings } from '@mapbox/vector-tile';
@@ -13,11 +15,14 @@ import { PbfReader } from 'pbf';
 import {
   BufferAttribute,
   BufferGeometry,
+  DataTexture,
   Group,
   Mesh,
   MeshLambertMaterial,
+  RGBAFormat,
   ShapeUtils,
   Vector2,
+  type Texture,
 } from 'three';
 import { TILE_SIZE, gridTileRange } from '../core/geo';
 import { CELL_SEA } from '../core/types';
@@ -97,6 +102,15 @@ export class BuildingLayer {
   status: BuildingStatus = 'idle';
   count = 0;
   private readonly material = new MeshLambertMaterial({ vertexColors: true });
+  /** 足元の色分け（グリッドに合わせたテクスチャ。u=東向き, v=南向き） */
+  private readonly empty = new DataTexture(new Uint8Array(4), 1, 1, RGBAFormat);
+  private readonly tint = {
+    uOv: { value: this.empty as Texture },
+    uOvOn: { value: 0 },
+    uHz: { value: this.empty as Texture },
+    uHzOn: { value: 0 },
+    uOvScale: { value: new Vector2(0, 0) },
+  };
   private readonly cache = new Map<string, ArrayBuffer | null>();
   private tilesUrl: string | null = null;
   private sampler: HeightSampler | null = null;
@@ -108,10 +122,44 @@ export class BuildingLayer {
 
   constructor(private readonly onUpdate: () => void) {
     this.group.name = 'buildings';
+    this.empty.needsUpdate = true;
+    // ローカル座標 (x, z) [m] → グリッドのテクスチャ座標。色は拡散色に混ぜる（陰影はそのまま）
+    this.material.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, this.tint);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nuniform vec2 uOvScale;\nvarying vec2 vOvUv;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvOvUv = position.xz * uOvScale + 0.5;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          '#include <common>\nuniform sampler2D uOv;\nuniform float uOvOn;\nuniform sampler2D uHz;\nuniform float uHzOn;\nvarying vec2 vOvUv;',
+        )
+        .replace(
+          '#include <color_fragment>',
+          [
+            '#include <color_fragment>',
+            'if (uOvOn > 0.0) { vec4 ov = texture2D(uOv, vOvUv); diffuseColor.rgb = mix(diffuseColor.rgb, ov.rgb, ov.a * uOvOn); }',
+            'if (uHzOn > 0.0) { vec4 hz = texture2D(uHz, vOvUv); diffuseColor.rgb = mix(diffuseColor.rgb, hz.rgb, hz.a * uHzOn); }',
+          ].join('\n'),
+        );
+    };
+  }
+
+  /** 最大浸水深・到達時間の色（グリッドと同じ大きさのテクスチャ、sRGB）。null で消す */
+  setOverlay(tex: Texture | null, strength: number): void {
+    this.tint.uOv.value = tex ?? this.empty;
+    this.tint.uOvOn.value = tex ? strength : 0;
+  }
+
+  /** 公式の津波浸水想定（グリッドの範囲に貼ったタイル画像）。null で消す */
+  setHazard(tex: Texture | null, opacity: number): void {
+    this.tint.uHz.value = tex ?? this.empty;
+    this.tint.uHzOn.value = tex ? opacity : 0;
   }
 
   setGrid(sampler: HeightSampler | null): void {
     this.sampler = sampler;
+    if (sampler) this.tint.uOvScale.value.set(1 / (sampler.spec.nx * sampler.spec.dx), 1 / (sampler.spec.ny * sampler.spec.dx));
     this.clearMeshes();
     this.built = false;
     if (this.enabled) this.start();
@@ -229,6 +277,7 @@ export class BuildingLayer {
   dispose(): void {
     this.clearMeshes();
     this.material.dispose();
+    this.empty.dispose();
     this.cache.clear();
   }
 }
