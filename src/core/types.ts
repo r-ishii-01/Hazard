@@ -81,8 +81,14 @@ export interface QuakeScenario {
   periodMin: number;
   /** 第1波の初動: 'rise'=押し波から, 'fall'=引き波から */
   firstMotion: 'rise' | 'fall';
-  /** 有意な波の数（後続波は減衰） */
+  /** 有意な波の数（waveAmplitudes が無ければ後続波は1波ごとに0.75倍に減衰） */
   waves: number;
+  /**
+   * 各波の相対的な大きさ（最大の波を 1 とする。省略可）。
+   * 与えた場合、第 i 波の振幅は最大の波の振幅 × waveAmplitudes[i]。波の数 waves の方が多ければ最後の値を繰り返す。
+   * 校正は、海岸の最大水位（全体の最大）を coastHeight に、最大の波の山を arrivalMin に合わせる。
+   */
+  waveAmplitudes?: number[];
   /** 強い揺れの継続時間 [秒]（揺れアニメーション用） */
   shakingSec: number;
   /** 想定される気象庁の発表区分 */

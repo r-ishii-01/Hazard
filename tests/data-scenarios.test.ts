@@ -14,6 +14,7 @@ import {
   getScenario,
 } from '../src/data/scenarios';
 import { INTENSITY_INFO } from '../src/data/intensity';
+import { maxCrestOffset, maxWaveIndex, relativeAmplitudes } from '../src/sim/wave';
 import {
   JMA_ISSUE_TARGET_NOTE,
   JMA_ISSUE_TARGET_SEC,
@@ -167,6 +168,61 @@ describe('SHINDO_PRESETS', () => {
 
   it('the initial scenario (震度7) exists', () => {
     expect(getScenario(SHINDO_PRESETS['7'].scenarioId)).toBeDefined();
+  });
+});
+
+describe('周期・波形（公的な想定のシナリオ）', () => {
+  const official = SCENARIOS.filter((s) => s.isOfficial);
+
+  it('各波の相対振幅は 0〜1 で最大が 1、波の数は相対振幅の数以上', () => {
+    for (const s of official) {
+      const a = s.waveAmplitudes;
+      expect(a, s.id).toBeDefined();
+      expect(Math.max(...a!), s.id).toBe(1);
+      for (const v of a!) {
+        expect(v, s.id).toBeGreaterThan(0);
+        expect(v, s.id).toBeLessThanOrEqual(1);
+      }
+      expect(s.waves, s.id).toBeGreaterThanOrEqual(a!.length);
+      // 周期20分 × 波の数で計算時間の上限（120分）まで波が繰り返す
+      expect(s.waves * s.periodMin, s.id).toBeGreaterThanOrEqual(DURATION_OPTIONS_MIN[DURATION_OPTIONS_MIN.length - 1]);
+    }
+  });
+
+  it('相模トラフ沿いの地震は周期20分・後の波0.4倍、最大の波は第1波', () => {
+    for (const id of ['sagami-west', 'sagami-central', 'genroku', 'taisho']) {
+      const s = getScenario(id)!;
+      expect(s.periodMin, id).toBe(20);
+      expect(relativeAmplitudes(s.waveAmplitudes, s.waves), id).toEqual([1, 0.4, 0.4, 0.4, 0.4, 0.4]);
+      expect(maxWaveIndex({ waves: s.waves, amplitudes: s.waveAmplitudes }), id).toBe(0);
+    }
+  });
+
+  it('慶長型・明応型は最大の波の1周期前に小さな第1波がある', () => {
+    for (const id of ['keicho', 'meio']) {
+      const s = getScenario(id)!;
+      const rel = relativeAmplitudes(s.waveAmplitudes, s.waves)!;
+      expect(maxWaveIndex({ waves: s.waves, amplitudes: s.waveAmplitudes }), id).toBe(1);
+      expect(rel[0], id).toBeLessThan(0.5);
+    }
+  });
+
+  it('最大の波の山は、境界からの伝播（約3分）を見込んでも到達時間に間に合う（到達の30秒以内）', () => {
+    // 沖側境界（約2km沖）から鵠沼海岸までの長波の伝播と浅海での遅れは実地形の試算で約3.3分（docs/MODEL.md）
+    const travelSec = 3.3 * 60;
+    for (const s of official) {
+      const off = maxCrestOffset({ periodSec: s.periodMin * 60, firstMotion: s.firstMotion, waves: s.waves, amplitudes: s.waveAmplitudes });
+      expect(off + travelSec - s.arrivalMin * 60, s.id).toBeLessThan(30);
+    }
+  });
+
+  it('周期・後の波の大きさは仮定であることと根拠を説明している', () => {
+    for (const s of official) {
+      const text = (s.assumptions ?? []).join('\n');
+      expect(text, s.id).toMatch(/周期\d+分（仮定/);
+      expect(text, s.id).toMatch(/倍（仮定|倍で繰り返す（仮定/);
+      expect(s.description, s.id).toContain('仮定');
+    }
   });
 });
 

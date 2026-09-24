@@ -8,8 +8,9 @@
  *    （各セルの最大水位の 90 パーセンタイル）が目標 coastHeight になるよう試算で決める。
  *    約 62 m の粗い格子で1回試算して増幅率の見当をつけ、約 31 m の格子で1〜2回試算して補正する
  *    （比例補正 → べき乗則 a = k·A^p の当てはめ）。
- *    第1波の山が海岸に届くまでの時間も最後の試算から測り、到達時間 arrivalMin に山が届くよう
- *    境界での入力開始時刻をずらす（海底地形からの伝播時間 ∫ds/√(gh) は試算時間の見積もりと予備に使う）。
+ *    最大の波（既定では第1波。シナリオの waveAmplitudes で後の波を最大にもできる）の山が海岸に届くまでの時間も
+ *    最後の試算から測り、到達時間 arrivalMin に山が届くよう境界での入力開始時刻をずらす
+ *    （海底地形からの伝播時間 ∫ds/√(gh) は試算時間の見積もり、後の波が最大の場合にその山を探す範囲、予備に使う）。
  * 3. 本計算: 指定解像度の格子で計算し、frameInterval 秒ごとに全水深（cm, Uint16）を出力。
  *    初期状態では、海と、潮位より低く海とつながる土地（潮間帯）を潮位で静止した水域とし、それ以外の陸は乾燥とする。
  *    波が境界に入る前の海は厳密に静止しているので、その間は計算せずフレーム 0 と同じとする。
@@ -20,7 +21,7 @@ import type { GridSpec } from '../core/geo';
 import { CELL_SEA, type SimParams } from '../core/types';
 import { ShallowWaterSolver, initialWaterMask, maxStillDepth, sideBoundaryProfile, stableTimeStep, type SideProfile, type SolverGrid } from './solver';
 import { partitionRows, rowWorkWeights, type BandSpec, type WetMap } from './band';
-import { firstCrestOffset, makeIncidentWave, type IncidentWaveSpec } from './wave';
+import { firstCrestOffset, makeIncidentWave, maxCrestOffset, maxWaveIndex, relativeAmplitudes, type IncidentWaveSpec } from './wave';
 import { coastSegment, decimateGrid, findGaugeCell, openSeaMask, percentile, travelTimeToSegment } from './site';
 import { UNSTABLE_MESSAGE, progressMessage } from './common';
 export { UNSTABLE_MESSAGE, progressMessage } from './common';
@@ -49,7 +50,7 @@ export interface CalibrationInfo {
   boundaryAmplitude: number;
   /** 境界で波の入力を始める時刻 [秒] */
   boundaryStartSec: number;
-  /** 第1波の山が海岸に届く見込みの時刻 [秒] */
+  /** 最大の波（既定では第1波）の山が海岸に届く見込みの時刻 [秒] */
   expectedCrestSec: number;
   /** 試算の記録（振幅 [m]、得られた海岸の最大水位 [m, T.P.]、試算に使った格子のセル辺長 [m]） */
   trials: { amplitude: number; achieved: number; cellM: number }[];
@@ -105,6 +106,8 @@ const CALIBRATION_CELL_M = 31;
 const GAUGE_INTERVAL_TARGET = 10;
 /** 目標との差がこの割合以内なら校正を打ち切る */
 const CALIBRATION_TOLERANCE = 0.04;
+/** 最大の波の山が到達時間よりこれ以上遅れる場合だけ注記する [秒]（公的資料の到達時間は分単位の値） */
+const ARRIVAL_NOTE_TOLERANCE_SEC = 30;
 
 export function frameIntervalFor(resolution: SimParams['resolution']): number {
   return resolution === 'fine' ? 30 : 20;
@@ -199,6 +202,8 @@ export function prepareRun(rawInput: EngineInput, sink: EngineSink, opts: Engine
   const noWave = !(target > 0.05);
   const periodSec = Math.max(60, (sc.periodMin > 0 ? sc.periodMin : 10) * 60);
   const waves = Math.max(1, Math.round(sc.waves > 0 ? sc.waves : 1));
+  // 各波の相対振幅（シナリオに指定がある場合のみ。無ければ 1 波ごとに減衰させる既定の波形）
+  const amplitudes = relativeAmplitudes(sc.waveAmplitudes, waves) ?? undefined;
   const arrivalSec = Math.max(0, (Number.isFinite(sc.arrivalMin) ? sc.arrivalMin : 0) * 60);
   let cal: CalibrationInfo;
   let wet: WetMap | null = null;
@@ -212,13 +217,13 @@ export function prepareRun(rawInput: EngineInput, sink: EngineSink, opts: Engine
       notes: ['想定する津波の高さが潮位とほぼ同じか低いため、津波は入力していません（潮位のみの静かな海）。'],
     };
   } else {
-    ({ info: cal, wet } = calibrate(input, tide, landManning, periodSec, waves, arrivalSec, opts.maxTrials ?? 3, (p, msg) =>
+    ({ info: cal, wet } = calibrate(input, tide, landManning, periodSec, waves, amplitudes, arrivalSec, opts.maxTrials ?? 3, (p, msg) =>
       sink.progress(0.01 + 0.19 * p, msg),
     ));
   }
   const calibrationMs = now() - t0;
   if (!noWave && cal.expectedCrestSec > durationSec) {
-    cal.notes.push('計算時間内に第1波は海岸に届きません。計算時間を長くしてください。');
+    cal.notes.push('計算時間内に最大の波は海岸に届きません。計算時間を長くしてください。');
   }
   sink.calibrated(cal);
 
@@ -229,7 +234,7 @@ export function prepareRun(rawInput: EngineInput, sink: EngineSink, opts: Engine
   const dt = frameInterval / stepsPerFrame;
   const incident: IncidentWaveSpec | null = noWave
     ? null
-    : { amplitude: cal.boundaryAmplitude, periodSec, waves, firstMotion: sc.firstMotion, startSec: cal.boundaryStartSec };
+    : { amplitude: cal.boundaryAmplitude, periodSec, waves, firstMotion: sc.firstMotion, startSec: cal.boundaryStartSec, amplitudes };
   const sides = { west: sideBoundaryProfile(grid, tide, false), east: sideBoundaryProfile(grid, tide, true) };
   const solver = new ShallowWaterSolver(grid, {
     tide,
@@ -377,7 +382,7 @@ interface TrialResult {
   /** 試算で一度でも濡れたセル（試算の格子） */
   wet: Uint8Array;
   achieved: number;
-  /** 入力開始から第1波の山が海岸に届くまでの時間 [秒]（求まらなければ NaN） */
+  /** 入力開始から最大の波の山が海岸に届くまでの時間 [秒]（求まらなければ NaN） */
   crestDelay: number;
 }
 
@@ -406,6 +411,7 @@ function calibrate(
   landManning: number,
   periodSec: number,
   waves: number,
+  amplitudes: number[] | undefined,
   arrivalSec: number,
   maxTrials: number,
   progress: (p: number, msg: string) => void,
@@ -417,7 +423,10 @@ function calibrate(
   const factor = Math.max(1, Math.round(CALIBRATION_CELL_M / input.spec.dx));
   const main = trialGrid(input, tide, factor);
   const quick = maxTrials >= 3 ? trialGrid(input, tide, factor * 2) : null;
-  const crestOffset = firstCrestOffset({ periodSec, firstMotion: sc.firstMotion });
+  const waveShape = { periodSec, firstMotion: sc.firstMotion, waves, amplitudes };
+  // 入力開始から最大の波の山が境界を通過するまでの時間（既定の減衰する波形では第1波の山）
+  const crestOffset = maxCrestOffset(waveShape);
+  const maxIndex = maxWaveIndex(waveShape);
   let travel = main ? travelTimeToSegment({ spec: main.spec, z: main.grid.z, kind: main.grid.kind }, tide, main.seg) : NaN;
   if (!Number.isFinite(travel)) travel = travelTimeToSegment(input, tide, coastSegment(input, tide).cells);
   if (!Number.isFinite(travel)) travel = 0;
@@ -447,8 +456,11 @@ function calibrate(
     return { info, wet: null };
   }
 
-  // 試算の計算時間: 第1波の山が届くまで + 1.5 周期（第2波の山まで。ただし最大 3 時間）
-  const horizon = Math.min(3 * 3600, crestOffset + travel + 1.5 * periodSec);
+  // 試算の計算時間: 最大の波の山が届くまで + 1.5 周期（次の波の山まで。ただし最大 3 時間）。
+  // 最大の波より後に同程度（0.8 倍以上）の波がある場合は、その山までを含める
+  let lastBig = maxIndex;
+  if (amplitudes) for (let i = maxIndex + 1; i < amplitudes.length; i++) if (amplitudes[i] >= 0.8) lastBig = i;
+  const horizon = Math.min(3 * 3600, firstCrestOffset(waveShape) + lastBig * periodSec + travel + 1.5 * periodSec);
   const plan: TrialGrid[] = [];
   if (quick && quick.seg.length > 0) plan.push(quick);
   while (plan.length < Math.max(1, maxTrials)) plan.push(main);
@@ -464,7 +476,7 @@ function calibrate(
     const tg = plan[it];
     const label = `沖合の波の高さを調整中…（試算 ${it + 1}/${plan.length}）`;
     progress(doneCost / totalCost, label);
-    const res = trialRun(tg.grid, tg.seg, tide, landManning, tg.hMax, A, periodSec, waves, sc.firstMotion, horizon, (p) =>
+    const res = trialRun(tg.grid, tg.seg, tide, landManning, tg.hMax, A, periodSec, waves, amplitudes, sc.firstMotion, horizon, crestOffset, travel, (p) =>
       progress((doneCost + p * tg.cost) / totalCost, label),
     );
     doneCost += tg.cost;
@@ -496,16 +508,19 @@ function calibrate(
     }
   }
 
-  // 第1波の山が海岸に届くまでの時間は最後の試算（約 31 m 格子）から測る。
+  // 最大の波の山が海岸に届くまでの時間は最後の試算（約 31 m 格子）から測る。
   // 振幅の補正による非線形効果（波速の変化）はわずかなので無視する。
   const measured = last && Number.isFinite(last.crestDelay) ? last.crestDelay : NaN;
   const crestDelay = Math.max(0, Number.isFinite(measured) ? measured : crestOffset + travel);
   let start = arrivalSec - crestDelay;
   if (start < 0) {
-    notes.push(
-      `設定した到達時間（${fmtMin(arrivalSec)}）は、計算領域の沖側境界から海岸までの伝播時間などより短いため、` +
-        `第1波の山の到達は約${fmtMin(crestDelay)}になります。`,
-    );
+    // 公的資料の到達時間は分単位の値なので、30 秒未満の遅れは注記しない（山の時刻は expectedCrestSec に残る）
+    if (-start >= ARRIVAL_NOTE_TOLERANCE_SEC) {
+      notes.push(
+        `設定した到達時間（${fmtMin(arrivalSec)}）は、計算領域の沖側境界から海岸までの伝播時間などより短いため、` +
+          `最大の波の山の到達は約${fmtMin(crestDelay)}になります。`,
+      );
+    }
     start = 0;
   }
   const info: CalibrationInfo = {
@@ -546,12 +561,16 @@ function trialRun(
   A: number,
   periodSec: number,
   waves: number,
+  amplitudes: number[] | undefined,
   firstMotion: 'rise' | 'fall',
   horizon: number,
+  maxCrestOffsetSec: number,
+  travelSec: number,
   progress: (p: number) => void,
 ): TrialResult {
   const dt = stableTimeStep(grid.dx, hMax, Math.max(2 * A, 0.5));
-  const incident = makeIncidentWave({ amplitude: A, periodSec, waves, firstMotion, startSec: 0 });
+  const shape = { periodSec, waves, firstMotion, amplitudes };
+  const incident = makeIncidentWave({ amplitude: A, startSec: 0, ...shape });
   const solver = new ShallowWaterSolver(grid, { tide, landManning, dt, incident });
   const steps = Math.ceil(horizon / dt);
   const sampleEvery = Math.max(1, Math.round(5 / dt));
@@ -571,7 +590,40 @@ function trialRun(
   }
   const wet = new Uint8Array(solver.n);
   for (let k = 0; k < solver.n; k++) wet[k] = solver.maxEta[k] !== -Infinity ? 1 : 0;
-  return { wet, achieved: coastMax(solver, seg, tide), crestDelay: firstCrestTime(times, means) };
+  // 最大の波が第1波なら「最初の山」、後の波なら、境界をその山が通る時刻 + 伝播時間の見込みの付近で最も高い山
+  const crestDelay =
+    maxWaveIndex(shape) === 0
+      ? firstCrestTime(times, means)
+      : crestTimeNear(times, means, ...maxCrestWindow(maxCrestOffsetSec, travelSec, periodSec));
+  return { wet, achieved: coastMax(solver, seg, tide), crestDelay };
+}
+
+/**
+ * 後の波が最大の場合に、海岸（校正区間の平均水位）で最大の波の山を探す時間の範囲 [中心, 半幅]（秒）。
+ * 伝播時間の見込み ∫ds/√(gh)（線形の長波の速さ）は、振幅の大きな山の実際の遅れより長めになる
+ * （実地形の西側モデルで見込み約 4.8 分に対し、山の実際の遅れは約 3.4 分。汀線近くの浅い所では √(gh) が小さいが、
+ * 実際の山は高さ η の分だけ √(g(h+η)) で速く進むため）。
+ * そこで範囲を「境界の山の時刻 + 伝播時間の 0.5〜1 倍」の前後半周期とする。
+ * 周期が短い（例: 2 分）と、見込みの前後半周期だけでは本当の山が範囲の外に出て、別の波の山を拾ってしまう。
+ */
+export function maxCrestWindow(maxCrestOffsetSec: number, travelSec: number, periodSec: number): [number, number] {
+  const tr = Math.max(0, travelSec);
+  return [maxCrestOffsetSec + 0.75 * tr, 0.5 * periodSec + 0.25 * tr];
+}
+
+/**
+ * 時刻 expected の前後 halfWindow 秒の範囲で最も高い極大の時刻（無ければ NaN）。
+ * 区間平均の水位の時系列から、最大の波の山の時刻を求めるのに使う。
+ */
+export function crestTimeNear(times: number[], values: number[], expected: number, halfWindow: number): number {
+  let best = -1;
+  for (let i = 1; i < values.length - 1; i++) {
+    const t = times[i];
+    if (t < expected - halfWindow || t > expected + halfWindow) continue;
+    if (!(values[i] >= values[i - 1] && values[i] > values[i + 1])) continue;
+    if (best < 0 || values[i] > values[best]) best = i;
+  }
+  return best >= 0 ? times[best] : NaN;
 }
 
 /** 区間平均の水位の時系列から、第1波の山の時刻を求める（最大上昇量の半分を初めて超えた後の極大） */

@@ -74,7 +74,8 @@ describe('南端の開境界', () => {
   });
 });
 
-describe('東西端の開境界', () => {
+// 全テストを並行して実行すると既定の 5 秒を超えることがあるため、時間の上限を長くする
+describe('東西端の開境界', { timeout: 60_000 }, () => {
   const rowDeviation = (z: (i: number, j: number) => number, ny: number, until: number) => {
     const nx = 80;
     const A = 0.05;

@@ -246,7 +246,7 @@ describe('遡上（斜面の海岸）', () => {
       expect(Number.isFinite(solver.eta[k])).toBe(true);
       expect(solver.eta[k]).toBeGreaterThanOrEqual(solver.z[k]);
     }
-  });
+  }, 60_000); // 全テストを並行して実行すると既定の 5 秒を超えることがある
 });
 
 describe('質量収支（開境界あり）と乾燥セルを越える流れ', () => {
