@@ -34,6 +34,7 @@ import {
   RELIEF_TILES,
   depthToRgba,
 } from '../data/sources';
+import * as Sources from '../data/sources';
 import { BuildingLayer } from './buildings';
 import { Environment } from './environment';
 import { LIGHT_UNIFORMS } from './environment';
@@ -127,6 +128,7 @@ export class View3D {
   private down: { x: number; y: number; t: number; id: number } | null = null;
   private readonly raycaster = new Raycaster();
   private readonly listeners: [EventTarget, string, EventListener][] = [];
+  private readonly waterSurfaceAt = (x: number, z: number): number | null => this.water.surfaceAt(x, z);
   private cameraDirty = true;
   private readonly lastCamPos = new Vector3(NaN, NaN, NaN);
   private readonly lastTarget = new Vector3(NaN, NaN, NaN);
@@ -461,7 +463,11 @@ export class View3D {
         this.env.setSeaLevel(tide, this.water.edgeEta);
         this.needsRender = true;
       }
-      if (tChanged) this.peopleDirty = true;
+      if (tChanged) {
+        this.peopleDirty = true;
+        // カーソル位置の浸水深も時刻に合わせて更新
+        if (this.pointer.inside) this.hoverPending = true;
+      }
     }
 
     // 最大浸水深・到達時間（頂点色）
@@ -529,6 +535,8 @@ export class View3D {
       seen.attribution = this.attributionHtml(s);
       this.overlay.setAttribution(seen.attribution);
     }
+    // 何か変わったら、しばらくさざ波のアニメーションを続ける
+    if (this.needsRender) this.lastActivity = now;
   }
 
   private createTiles(grid: TerrainGrid, source: (typeof BASEMAPS)['pale'], maxZoom: number): TileCanvas {
@@ -553,6 +561,9 @@ export class View3D {
       filter: landTile,
       onUpdate: () => {
         this.needsRender = true;
+      },
+      onFirstContent: () => {
+        this.seen.attribution = '';
       },
       onDone: (status) => {
         if (status === 'failed') console.info(`[view3d] タイルを取得できませんでした（${source.label}）。代替表示を使います。`);
@@ -595,13 +606,20 @@ export class View3D {
   private attributionHtml(s: AppState): string {
     const parts: string[] = [];
     const bm = BASEMAPS[s.basemap];
-    if (this.basemapTiles && this.basemapTiles.status !== 'failed') parts.push(`${GSI_ATTRIBUTION}（${escapeHtml(bm.label)}）`);
-    if (this.reliefTiles && this.reliefTiles.status !== 'failed') parts.push(`${GSI_ATTRIBUTION}（${escapeHtml(RELIEF_TILES.label)}）`);
-    if (this.hazardTiles) parts.push(`津波浸水想定: ${HAZARD_TSUNAMI_TILES.attribution}`);
+    // 実際にタイルを描けたときだけ出典を出す（取得できずに段彩で代替している間は出さない）
+    if (this.basemapTiles?.hasContent) {
+      // 写真のズーム14以上は全国最新写真で「地理院タイル」の出典のみ。ズーム9〜13（ランドサット）を使うときだけ追加の出所を併記
+      const simple = bm.attribution === GSI_ATTRIBUTION || (s.basemap === 'photo' && this.basemapTiles.zoom >= 14);
+      parts.push(simple ? `${GSI_ATTRIBUTION}（${escapeHtml(bm.label)}）` : bm.attribution);
+    }
+    if (this.reliefTiles?.hasContent) parts.push(RELIEF_TILES.attribution);
+    if (this.hazardTiles?.hasContent) parts.push(HAZARD_TSUNAMI_TILES.attribution);
     const grid = s.terrain.grid;
     if (grid) {
-      const label = grid.sourceLabel || '国土地理院の標高タイルを加工して作成';
-      parts.push(`地形: ${escapeHtml(label)}`);
+      // 標高タイルから作った地形は「加工して作成」の記載（リンク付き）。合成地形はその旨を表示
+      const demHtml = (Sources as unknown as Record<string, unknown>).DEM_CREDIT_HTML;
+      const derived = typeof demHtml === 'string' ? demHtml : `${GSI_ATTRIBUTION}（標高タイル）を加工して作成`;
+      parts.push(grid.source === 'synthetic' ? `地形: ${escapeHtml(grid.sourceLabel || '合成（近似）地形')}` : `地形: ${derived}`);
     }
     if (s.layers.buildings && this.buildings.status !== 'failed') parts.push(`建物: ${OPENFREEMAP.attribution}`);
     return parts.join(' ｜ ');
@@ -619,12 +637,15 @@ export class View3D {
     this.water.invalidate();
     this.buildings.setGrid(this.sampler);
     this.people.rebuildRoutes(this.sampler);
+    // 地形が無い間は人物・避難場所を出さない
+    this.people.group.visible = !!grid;
+    this.people.routes.visible = !!grid;
     if (grid) {
       this.frameSpec = grid.spec;
       const { nx, ny, dx } = grid.spec;
       const hw = ((nx - 1) / 2) * dx;
       const hh = ((ny - 1) / 2) * dx;
-      // 東西端の海岸線（最も北の海セル…の南側で陸→海に変わる位置）
+      // 東西端の海岸線: 南端から北へたどり、陸のセルに当たる手前（海・河川が続く北端）の位置
       const coastAt = (i: number): number => {
         let j0 = ny - 1;
         for (let j = ny - 1; j >= 0; j--) {
@@ -734,6 +755,8 @@ export class View3D {
     this.updateNote();
     this.lastCamPos.copy(cam.position);
     this.lastTarget.copy(c.target);
+    // 止まっているポインターの下にあるものも変わるので、ツールチップ・カーソル情報を更新
+    if (this.pointer.inside) this.hoverPending = true;
     this.needsRender = true;
   }
 
@@ -760,6 +783,7 @@ export class View3D {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this.overlay.layout();
     if (!this.framed && !this.camAnim) this.resetView(false);
     this.cameraDirty = true;
     this.needsRender = true;
@@ -786,6 +810,8 @@ export class View3D {
       selectedId: s.selectedPersonId,
       camera: this.camera,
       viewportW: this.viewportW,
+      showFlood: s.layers.simFlood && !!s.sim.output,
+      waterSurfaceAt: this.waterSurfaceAt,
     });
   }
 
@@ -837,10 +863,21 @@ export class View3D {
     const s = this.store.get();
     if (s.placing) {
       const hit = this.pickGround(x, y);
-      if (hit && this.sampler) {
-        const ll = this.sampler.toLonLat(hit.x, hit.z);
-        this.actions.addPerson(s.placing, ll.lon, ll.lat);
+      if (!hit || !this.sampler) {
+        this.overlay.toast('計算範囲の中（地形の上）に置いてください');
+        return;
       }
+      const k = this.sampler.cellIndex(hit.x, hit.z);
+      if (k < 0) {
+        this.overlay.toast('計算範囲の中（地形の上）に置いてください');
+        return;
+      }
+      if (this.sampler.grid.kind[k] === CELL_SEA) {
+        this.overlay.toast('海や川の上には置けません');
+        return;
+      }
+      const ll = this.sampler.toLonLat(hit.x, hit.z);
+      this.actions.addPerson(s.placing, ll.lon, ll.lat);
       return;
     }
     const id = this.people.pick(x, y, this.camera, this.viewportW, this.viewportH);
@@ -876,9 +913,10 @@ export class View3D {
     let depth: number | null = null;
     const out = s.sim.output;
     const k = this.sampler.cellIndex(hit.x, hit.z);
-    if (out && k >= 0) {
-      const d = out.depthAt(Math.min(s.time.t, out.timeReady()), k);
-      depth = Number.isFinite(d) ? d : null;
+    // 海・川のセルの全水深は「浸水深」ではないので出さない（2D 地図と同じ扱い）
+    if (out && out.framesReady() > 0 && k >= 0 && this.sampler.grid.kind[k] !== CELL_SEA) {
+      const d = out.depthAt(Math.max(0, Math.min(s.time.t, out.timeReady())), k);
+      depth = Number.isFinite(d) ? Math.max(0, d) : null;
     }
     this.actions.setCursor({ lon: ll.lon, lat: ll.lat, ground, depth });
   }

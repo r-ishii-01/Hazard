@@ -23,6 +23,8 @@ export interface TileCanvasOptions {
   filter?: (x: number, y: number, z: number) => boolean;
   /** テクスチャが更新された（再描画が必要） */
   onUpdate: () => void;
+  /** 最初のタイルを描いた（出典表示の更新用） */
+  onFirstContent?: () => void;
   /** 全タイルの処理が終わった */
   onDone?: (status: TileCanvasStatus, loaded: number, failed: number) => void;
 }
@@ -117,7 +119,10 @@ export class TileCanvas {
             this.ctx.drawImage(bmp, Math.round(t.x * TILE_SIZE - ox), Math.round(t.y * TILE_SIZE - oy), TILE_SIZE, TILE_SIZE);
             bmp.close();
             loaded += 1;
-            this.hasContent = true;
+            if (!this.hasContent) {
+              this.hasContent = true;
+              this.opts.onFirstContent?.();
+            }
             this.scheduleUpdate();
           } else {
             missing += 1;

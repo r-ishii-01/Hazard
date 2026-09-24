@@ -135,6 +135,10 @@ export interface PeopleUpdateContext {
   selectedId: string | null;
   camera: Camera;
   viewportW: number;
+  /** 浸水（計算結果）の水面を表示しているか */
+  showFlood: boolean;
+  /** 描画中の水面の高さ [m, T.P.]（見えていなければ null） */
+  waterSurfaceAt: (x: number, z: number) => number | null;
 }
 
 export class PeopleLayer {
@@ -147,7 +151,7 @@ export class PeopleLayer {
   private readonly bodySelMat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.5, metalness: 0, emissive: new Color('#ffffff'), emissiveIntensity: 0.12 });
   private readonly ringGeo = new RingGeometry(0.42, 0.66, 40).rotateX(-Math.PI / 2);
   private readonly selGeo = new RingGeometry(0.78, 0.94, 48).rotateX(-Math.PI / 2);
-  private readonly selMat = new MeshBasicMaterial({ color: '#facc15', transparent: true, opacity: 0.95, depthTest: false, depthWrite: false });
+  private readonly selMat = new MeshBasicMaterial({ color: '#facc15', transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, toneMapped: false });
   private readonly selRing: Mesh;
   private readonly entries = new Map<string, Entry>();
   private readonly tmp = new Vector3();
@@ -211,7 +215,7 @@ export class PeopleLayer {
     const body = new Mesh(geometry, this.bodyMat);
     body.name = `person-${p.id}`;
     root.add(body);
-    const ringMat = new MeshBasicMaterial({ color: STATUS_COLORS.waiting, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false });
+    const ringMat = new MeshBasicMaterial({ color: STATUS_COLORS.waiting, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, toneMapped: false });
     const ring = new Mesh(this.ringGeo, ringMat);
     ring.renderOrder = 5;
     const label = new LabelSprite();
@@ -344,6 +348,7 @@ export class PeopleLayer {
       fragmentShader: ROUTE_FRAG,
       transparent: true,
       depthWrite: false,
+      toneMapped: false,
       // 斜面で地面に埋もれないよう手前に寄せる
       polygonOffset: true,
       polygonOffsetFactor: -2,
@@ -369,13 +374,21 @@ export class PeopleLayer {
       }
       e.state = st;
       const q = c.sampler.toLocal(st.lon, st.lat);
-      let ground = c.sampler.height(q.x, q.z);
+      // 描画している地面・水面に合わせる（メッシュと同じ補間）
+      let ground = c.sampler.heightMesh(q.x, q.z);
       const k = c.sampler.cellIndex(q.x, q.z);
       if (k >= 0 && c.grid.kind[k] === CELL_SEA) ground = Math.max(ground, 1.5);
       const depth = Number.isFinite(st.depth) && st.depth > 0.01 ? st.depth : 0;
-      const surfaceY = (ground + depth) * c.exag;
-      // 浸水中は 水深/身長 の割合だけ沈める
-      const baseY = depth > 0 ? surfaceY - depth * S : ground * c.exag;
+      // 浸水表示を消しているときは沈めない（水が描かれていないため）
+      const shownDepth = c.showFlood ? depth : 0;
+      let surface = ground + shownDepth;
+      if (shownDepth > 0) {
+        const ws = c.waterSurfaceAt(q.x, q.z);
+        if (ws !== null) surface = Math.max(ws, ground);
+      }
+      const surfaceY = surface * c.exag;
+      // 浸水中は 水深/身長 の割合だけ、描かれた水面から沈める（足元が地面より下になっても地形・水面に隠れる）
+      const baseY = shownDepth > 0 ? surfaceY - shownDepth * S : ground * c.exag;
       // 向き（進行方向）
       if (Number.isFinite(e.lastX)) {
         const mx = q.x - e.lastX;
@@ -389,7 +402,7 @@ export class PeopleLayer {
       e.root.scale.setScalar(S);
       const selected = e.person.id === c.selectedId;
       e.body.material = selected ? this.bodySelMat : this.bodyMat;
-      const ringY = Math.max(ground * c.exag, surfaceY) + 0.05 * S;
+      const ringY = surfaceY + 0.05 * S;
       e.ring.position.set(q.x, ringY, q.z);
       e.ring.scale.setScalar(S);
       e.ringMat.color.set(STATUS_COLORS[st.status] ?? STATUS_COLORS.waiting);

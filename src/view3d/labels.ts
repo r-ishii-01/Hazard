@@ -38,7 +38,7 @@ export class LabelSprite {
     this.texture.colorSpace = SRGBColorSpace;
     this.texture.minFilter = LinearFilter;
     this.texture.generateMipmaps = false;
-    this.material = new SpriteMaterial({ map: this.texture, sizeAttenuation: false, depthTest: false, depthWrite: false, transparent: true });
+    this.material = new SpriteMaterial({ map: this.texture, sizeAttenuation: false, depthTest: false, depthWrite: false, transparent: true, toneMapped: false });
     this.sprite = new Sprite(this.material);
     this.sprite.center.set(0.5, 0);
     this.sprite.renderOrder = 20;

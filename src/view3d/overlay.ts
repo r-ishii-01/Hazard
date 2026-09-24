@@ -14,11 +14,13 @@ const CSS = `
 .v3d-compass{width:32px;height:32px;padding:0;justify-content:center;border-radius:50%}
 .v3d-compass svg{transition:none}
 .v3d-note{position:absolute;left:8px;bottom:6px;z-index:2;font:500 11px/1.35 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#1e293b;background:rgba(255,255,255,.82);border-radius:6px;padding:3px 7px;cursor:help;max-width:60%}
-.v3d-attrib{position:absolute;right:0;bottom:0;z-index:2;font:400 10.5px/1.4 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#334155;background:rgba(255,255,255,.8);padding:2px 6px;border-top-left-radius:6px;max-width:72%;text-align:right}
+.v3d-attrib{position:absolute;right:0;bottom:0;z-index:2;font:400 10px/1.4 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#334155;background:rgba(255,255,255,.8);padding:2px 6px;border-top-left-radius:6px;max-width:min(72%,720px);text-align:right}
 .v3d-attrib a{color:inherit;text-decoration:underline;text-decoration-color:rgba(51,65,85,.4)}
 .v3d-msg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2;font:600 13px/1.5 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#0f172a;background:rgba(255,255,255,.9);border-radius:10px;padding:10px 16px;box-shadow:0 2px 10px rgba(15,23,42,.2);pointer-events:none;text-align:center;max-width:80%}
 .v3d-tip{position:absolute;z-index:3;pointer-events:none;font:500 12px/1.45 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#f8fafc;background:rgba(15,23,42,.9);border-radius:6px;padding:5px 8px;white-space:pre-line;max-width:280px;transform:translate(12px,12px)}
 .v3d-root[data-placing="1"] canvas{cursor:crosshair}
+.v3d-toast{position:absolute;left:50%;top:56px;transform:translateX(-50%);z-index:3;font:600 12.5px/1.4 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#fff;background:rgba(15,23,42,.88);border-radius:8px;padding:7px 12px;pointer-events:none;transition:opacity .25s;opacity:0}
+.v3d-toast[data-show="1"]{opacity:1}
 `;
 
 export interface OverlayHandlers {
@@ -33,6 +35,8 @@ export class Overlay {
   private readonly attrib: HTMLDivElement;
   private readonly msg: HTMLDivElement;
   private readonly tip: HTMLDivElement;
+  private readonly toastEl: HTMLDivElement;
+  private toastTimer = 0;
   private attribHtml = '';
   private noteText = '';
 
@@ -78,7 +82,21 @@ export class Overlay {
     this.tip = document.createElement('div');
     this.tip.className = 'v3d-tip';
     this.tip.hidden = true;
-    this.root.append(this.tools, this.note, this.attrib, this.msg, this.tip);
+    this.toastEl = document.createElement('div');
+    this.toastEl.className = 'v3d-toast';
+    this.toastEl.setAttribute('role', 'status');
+    this.toastEl.setAttribute('aria-live', 'polite');
+    this.root.append(this.tools, this.note, this.attrib, this.msg, this.tip, this.toastEl);
+  }
+
+  /** 短い通知（数秒で消える） */
+  toast(text: string): void {
+    this.toastEl.textContent = text;
+    this.toastEl.dataset.show = '1';
+    window.clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => {
+      this.toastEl.dataset.show = '0';
+    }, 2600);
   }
 
   /** キャンバスを最背面に入れる */
@@ -96,12 +114,24 @@ export class Overlay {
     this.noteText = text;
     this.note.textContent = text;
     this.note.title = tooltip;
+    this.layout();
   }
 
   setAttribution(html: string): void {
     if (html === this.attribHtml) return;
     this.attribHtml = html;
     this.attrib.innerHTML = html;
+    this.layout();
+  }
+
+  /** 狭い画面で注記と出典が重なる場合は、注記を出典の上に移す */
+  layout(): void {
+    const w = this.root.clientWidth;
+    if (w === 0) return;
+    const aw = this.attrib.offsetWidth;
+    const nw = this.note.offsetWidth;
+    const overlap = 8 + nw + 8 > w - aw;
+    this.note.style.bottom = overlap ? `${this.attrib.offsetHeight + 6}px` : '';
   }
 
   setMessage(text: string | null): void {
@@ -129,6 +159,7 @@ export class Overlay {
   }
 
   dispose(): void {
+    window.clearTimeout(this.toastTimer);
     this.root.remove();
   }
 }

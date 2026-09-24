@@ -59,6 +59,14 @@ export class HeightSampler {
     return a * (1 - ty) + b * ty;
   }
 
+  /**
+   * 地形メッシュと同じ三角形分割（各四角形を右上—左下の対角線で2分割）で補間した地盤高。
+   * 人形の足元など、描画された地面にぴったり合わせたいときに使う。
+   */
+  heightMesh(x: number, zm: number): number {
+    return triInterp(this.z, this.nx, this.ny, x / this.dx + this.nx / 2 - 0.5, zm / this.dx + this.ny / 2 - 0.5, 1, 0);
+  }
+
   /** ローカル座標を含むセル添字（範囲外は -1） */
   cellIndex(x: number, zm: number): number {
     const gx = x / this.dx + this.nx / 2;
@@ -82,4 +90,28 @@ export class HeightSampler {
     const p = this.toLocal(lon, lat);
     return this.height(p.x, p.z);
   }
+}
+
+/**
+ * 格子点（セル中心）の値を、メッシュと同じ三角形分割で補間する。
+ * arr[k * stride + offset] が格子点 k の値。四角形 (a=(i,j), b=(i+1,j), d=(i,j+1), e=(i+1,j+1)) を
+ * 対角線 b–d で (a,d,b) と (b,d,e) に分ける（terrain.ts の index と同じ）。
+ */
+export function triInterp(arr: ArrayLike<number>, nx: number, ny: number, fx: number, fy: number, stride: number, offset: number): number {
+  const cx = Math.min(Math.max(fx, 0), nx - 1.0001);
+  const cy = Math.min(Math.max(fy, 0), ny - 1.0001);
+  const i = Math.floor(cx);
+  const j = Math.floor(cy);
+  const tx = cx - i;
+  const ty = cy - j;
+  const ka = j * nx + i;
+  const kb = ka + 1;
+  const kd = ka + nx;
+  const ke = kd + 1;
+  const va = arr[ka * stride + offset];
+  const vb = arr[kb * stride + offset];
+  const vd = arr[kd * stride + offset];
+  if (tx + ty <= 1) return va * (1 - tx - ty) + vb * tx + vd * ty;
+  const ve = arr[ke * stride + offset];
+  return vb * (1 - ty) + vd * (1 - tx) + ve * (tx + ty - 1);
 }

@@ -20,6 +20,7 @@ import {
 } from 'three';
 import { CELL_INLAND_WATER, CELL_LAND, CELL_SEA, type SimOutput, type TerrainGrid } from '../core/types';
 import { LIGHT_UNIFORMS, WATER_COMMON } from './environment';
+import { triInterp } from './sampler';
 
 const WET = 0.01;
 
@@ -98,18 +99,21 @@ void main() {
   vec3 base = mix(sea, mud, land);
   float fres;
   vec3 col = shadeWater(base, n, V, uSunDir, uSunColor, uHorizon, uZenith, 0.8, fres);
-  // 白波: 浅く急に水位が上がっているところ・浸水の先端・波打ち際
-  float nz = vnoise(vXZ * 0.09 + vec2(uTime * 0.35, -uTime * 0.2)) * 0.6 + vnoise(vXZ * 0.31 - uTime * 0.5) * 0.4;
+  // 白波: 水深に比べて急に水位が上がっている所（砕波の目安）・浸水の先端・波打ち際
+  // 遠くでは細かい模様を平均値に近づける（ざらつき防止）
+  float nFine = mix(vnoise(vXZ * 0.16 - uTime * 0.45), 0.5, smoothstep(1.0, 3.0, fw));
+  float nCoarse = mix(vnoise(vXZ * 0.05 + vec2(uTime * 0.3, -uTime * 0.18)), 0.5, smoothstep(8.0, 24.0, fw));
+  float nz = nCoarse * 0.55 + nFine * 0.45;
   float rise = max(vRise, 0.0);
   // 水位が上がっている所はやや明るく、下がっている所はやや暗く（波の山・谷の動きが見えるように）
   col += vec3(0.035, 0.06, 0.055) * clamp(rise * 30.0, 0.0, 1.0) * (1.0 - land);
   col *= 1.0 - 0.14 * clamp(-vRise * 30.0, 0.0, 1.0);
-  // 砕ける津波の先端: 浅い所ほど白波が立ちやすい
-  float foamAmt = clamp(rise * uFoamGain, 0.0, 1.0) * (1.0 - smoothstep(4.0, 22.0, d));
-  foamAmt += land * (1.0 - smoothstep(0.03, 0.45, d)) * smoothstep(0.0005, 0.01, rise) * 0.9;
+  float relRise = rise / (d + 0.4);
+  float foamAmt = smoothstep(0.004, 0.03, relRise) * (1.0 - smoothstep(3.0, 9.0, d));
+  foamAmt += land * (1.0 - smoothstep(0.03, 0.45, d)) * smoothstep(0.0005, 0.01, rise) * 0.8;
   foamAmt += (1.0 - land) * (1.0 - smoothstep(0.05, 1.1, d)) * (0.45 + 0.25 * sin(uTime * 1.3 + vXZ.y * 0.12 + vXZ.x * 0.01));
-  float foam = smoothstep(0.35, 0.8, foamAmt * (0.45 + 0.75 * nz));
-  col = mix(col, uFoam, foam);
+  float foam = smoothstep(0.3, 0.95, foamAmt * (0.35 + 0.9 * nz));
+  col = mix(col, uFoam, foam * 0.85);
   // 透明度: 浅い海は海底が透ける。濁った浸水はほぼ不透明
   float alpha = mix(mix(0.45, 1.0, smoothstep(0.2, 10.0, d)), mix(0.84, 0.96, smoothstep(0.05, 1.0, d)), land);
   alpha = mix(alpha, 1.0, fres * 0.5);
@@ -429,6 +433,22 @@ export class WaterLayer {
         if (mask[kk] === 0) mask[kk] = 1;
       }
     }
+  }
+
+  /**
+   * 描画している水面の高さ [m, T.P.]（メッシュと同じ補間）。水面が見えていない所は null。
+   * 人形を水面に合わせて沈めるのに使う。
+   */
+  surfaceAt(x: number, zm: number): number | null {
+    const grid = this.grid;
+    if (!grid || !this.wAttr) return null;
+    const { nx, ny, dx } = grid.spec;
+    const fx = x / dx + nx / 2 - 0.5;
+    const fy = zm / dx + ny / 2 - 0.5;
+    const a = this.wAttr.array as Float32Array;
+    const alpha = triInterp(a, nx, ny, fx, fy, 4, 2);
+    if (alpha < 0.5) return null;
+    return triInterp(a, nx, ny, fx, fy, 4, 0);
   }
 
   /** 強制的に次回更新させる */

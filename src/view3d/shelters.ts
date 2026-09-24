@@ -38,7 +38,7 @@ export class ShelterLayer {
     let ic = this.icons.get(kind);
     if (!ic) {
       const tex = createShelterIcon(kind);
-      const mat = new SpriteMaterial({ map: tex, sizeAttenuation: false, depthTest: false, depthWrite: false, transparent: true });
+      const mat = new SpriteMaterial({ map: tex, sizeAttenuation: false, depthTest: false, depthWrite: false, transparent: true, toneMapped: false });
       ic = { tex, mat };
       this.icons.set(kind, ic);
     }
