@@ -272,6 +272,26 @@ export interface SheltersInfo {
   count: number;
 }
 
+export interface MapFocus {
+  lon: number;
+  lat: number;
+  zoom?: number;
+  /** 表示用のラベル（例: 検索した地名） */
+  label?: string;
+  seq: number;
+}
+
+export interface UserLocation {
+  lon: number;
+  lat: number;
+  /** 位置の精度（半径）[m] */
+  accuracyM: number;
+  /** 取得時刻（Date.now()） */
+  timestamp: number;
+  /** 計算範囲の内側か */
+  insideDomain: boolean;
+}
+
 export interface AppState {
   view: ViewMode;
   basemap: Basemap;
@@ -299,6 +319,13 @@ export interface AppState {
   /** 避難場所データの出所（読み込み後に設定。未読み込み・読み込み中は undefined） */
   sheltersInfo?: SheltersInfo;
   cursor: CursorInfo | null;
+  /**
+   * 地図・3D の視点を移す要求（地名検索・現在地など）。seq が増えるたびに各ビューが移動する。
+   * zoom は 2D 地図のズームレベル（省略時はビューに任せる）。
+   */
+  focus: MapFocus | null;
+  /** ブラウザの位置情報（Geolocation API）で得た現在地。未取得は null */
+  userLocation: UserLocation | null;
   /** 3D の鉛直強調倍率 */
   exaggeration: number;
 }

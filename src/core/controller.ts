@@ -14,6 +14,7 @@ import type {
   QuakeScenario,
   ShindoLevel,
   SimParams,
+  UserLocation,
   ViewMode,
 } from './types';
 import { loadTerrain } from '../terrain';
@@ -50,6 +51,10 @@ export interface AppActions {
   selectPerson(id: string | null): void;
   setCursor(c: CursorInfo | null): void;
   setExaggeration(x: number): void;
+  /** 2D 地図・3D ビューの視点を指定地点へ移す */
+  focusOn(lon: number, lat: number, opts?: { zoom?: number; label?: string }): void;
+  /** 現在地を設定（null で消去） */
+  setUserLocation(loc: UserLocation | null): void;
   reloadTerrain(resolution?: Resolution): void;
   /**
    * 初回の自動実行を許可する（「ご利用にあたって」を閉じた後に UI から呼ぶ）。
@@ -87,6 +92,8 @@ export function createInitialState(): AppState {
     placing: null,
     shelters: [],
     cursor: null,
+    focus: null,
+    userLocation: null,
     exaggeration: 2,
   };
 }
@@ -383,6 +390,11 @@ export function createController(store: Store<AppState>): AppActions {
     selectPerson: (selectedPersonId) => store.set({ selectedPersonId }),
     setCursor: (cursor) => store.set({ cursor }),
     setExaggeration: (exaggeration) => store.set({ exaggeration }),
+    focusOn: (lon, lat, opts = {}) => {
+      const seq = (store.get().focus?.seq ?? 0) + 1;
+      store.set({ focus: { lon, lat, zoom: opts.zoom, label: opts.label, seq } });
+    },
+    setUserLocation: (userLocation) => store.set({ userLocation }),
     reloadTerrain,
     armAutoRun: () => {
       if (autoArmed) return;
