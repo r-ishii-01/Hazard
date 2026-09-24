@@ -2,7 +2,7 @@
  * 2D 地図のスタイル（外部の style.json・グリフ・スプライトに依存しない）。
  * レイヤーの重なり順（下から）:
  *   背景 → 背景地図 → 色別標高 → 公式ハザードマップ → 到達時間 → 最大浸水深 → 浸水（現在）
- *   → 計算範囲の枠 → 避難経路 → 避難先
+ *   → 計算範囲の枠 → 現在地の精度の円 → 避難経路 → 避難先
  */
 import type { MapOptions } from 'maplibre-gl';
 import type { Basemap, LayerState } from '../core/types';
@@ -30,6 +30,9 @@ export const IDS = {
   routeDone: 'm2d-route-done',
   targetSource: 'm2d-targets',
   targetLayer: 'm2d-target',
+  userLocSource: 'm2d-userloc',
+  userLocFill: 'm2d-userloc-fill',
+  userLocLine: 'm2d-userloc-line',
 } as const;
 
 export const basemapLayerId = (b: Basemap) => `m2d-base-${b}`;
@@ -62,7 +65,10 @@ export function basemapLayer(b: Basemap): LayerSpec {
 export const SIM_OPACITY = { flood: 0.92, maxDepth: 0.85, arrival: 0.72 } as const;
 
 /** 最小限の GeoJSON 型（@types/geojson をグローバルに読み込んでいないため） */
-export type GeoGeometry = { type: 'Point'; coordinates: [number, number] } | { type: 'LineString'; coordinates: [number, number][] };
+export type GeoGeometry =
+  | { type: 'Point'; coordinates: [number, number] }
+  | { type: 'LineString'; coordinates: [number, number][] }
+  | { type: 'Polygon'; coordinates: [number, number][][] };
 export interface GeoFeature {
   type: 'Feature';
   properties: Record<string, unknown>;
@@ -100,6 +106,7 @@ export function buildStyle(basemap: Basemap, layers: LayerState, corners: Coords
       [IDS.domainSource]: { type: 'geojson', data: domainGeoJSON(corners) },
       [IDS.routeSource]: { type: 'geojson', data: emptyFC() },
       [IDS.targetSource]: { type: 'geojson', data: emptyFC() },
+      [IDS.userLocSource]: { type: 'geojson', data: emptyFC() },
     },
     layers: [
       { id: IDS.background, type: 'background', paint: { 'background-color': '#e8eef2' } },
@@ -132,6 +139,19 @@ export function buildStyle(basemap: Basemap, layers: LayerState, corners: Coords
         type: 'line',
         source: IDS.domainSource,
         paint: { 'line-color': '#1e293b', 'line-width': 1.6, 'line-dasharray': [3, 2.5], 'line-opacity': 0.85 },
+      },
+      // 現在地の精度（誤差の半径）の円
+      {
+        id: IDS.userLocFill,
+        type: 'fill',
+        source: IDS.userLocSource,
+        paint: { 'fill-color': '#2563eb', 'fill-opacity': 0.12 },
+      },
+      {
+        id: IDS.userLocLine,
+        type: 'line',
+        source: IDS.userLocSource,
+        paint: { 'line-color': '#2563eb', 'line-width': 1.5, 'line-opacity': 0.55 },
       },
       // 避難経路: 下地（白）→ 通過済み（実線）→ これから（破線）
       {

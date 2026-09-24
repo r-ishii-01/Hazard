@@ -15,6 +15,7 @@ import {
   MathUtils,
   NearestFilter,
   PerspectiveCamera,
+  Quaternion,
   RGBAFormat,
   Raycaster,
   SRGBColorSpace,
@@ -26,8 +27,8 @@ import {
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { AppStore } from '../core/store';
 import type { AppActions } from '../core/controller';
-import { INITIAL_CENTER, createGridSpec, lonLatToLocalMeters, TILE_SIZE, type GridSpec } from '../core/geo';
-import { CELL_LAND, CELL_SEA, type AppState, type Basemap, type SimOutput, type TerrainGrid } from '../core/types';
+import { INITIAL_CENTER, createGridSpec, lonLatToLocalMeters, metersPerPixel, TILE_SIZE, type GridSpec } from '../core/geo';
+import { CELL_LAND, CELL_SEA, type AppState, type Basemap, type MapFocus, type SimOutput, type TerrainGrid } from '../core/types';
 import {
   ARRIVAL_CLASSES,
   BASEMAPS,
@@ -41,22 +42,30 @@ import * as Sources from '../data/sources';
 import { BuildingLayer } from './buildings';
 import { Environment } from './environment';
 import { LIGHT_UNIFORMS } from './environment';
+import { MarkerLayer } from './markers';
 import { Overlay, escapeHtml } from './overlay';
 import { PeopleLayer } from './people';
 import { HeightSampler } from './sampler';
 import { ShelterLayer } from './shelters';
 import { TerrainLayer } from './terrain';
 import { TileCanvas } from './tileCanvas';
-import { WaterLayer } from './water';
+import { WaterLayer, type FloodColorMode } from './water';
 import { hazardTileMayExist } from '../map2d/hazardTiles';
 
 /** 初期視点: 沖合の南南西から、仰角 約45° で鵠沼海岸を見る */
 const INITIAL_AZIMUTH_DEG = 202;
 const INITIAL_POLAR_DEG = 47;
 const INITIAL_DISTANCE = 5800;
-/** 見やすさ倍率: 画面上で人形がおよそ一定の大きさになるよう、カメラ距離に比例させる */
-const SCALE_PER_METER = 0.0105;
-const MAX_SCALE = 80;
+/**
+ * 見やすさ倍率: 遠くからでも人形が見えるよう、カメラ距離に比例して拡大する（画面の高さ 800px のとき 距離 × 0.0042）。
+ * 上限は 25 倍（大人 1.7 m → 約 42 m）。これ以上大きくすると建物（多くは 6〜20 m）と比べて巨人に見え、
+ * 縮尺を誤解させるため。遠景では人形は小さくなるが、状態の色の輪（画面上で最小の大きさを保つ）とラベルで位置が分かる。
+ */
+const SCALE_PER_METER = 0.0042;
+const MAX_SCALE = 25;
+/** 視点移動（地名検索など）の距離の範囲 [m] */
+const FOCUS_MIN_DISTANCE = 150;
+const FOCUS_MAX_DISTANCE = 20000;
 /** 操作が無いとき、さざ波のアニメーションを続ける時間 [ms] */
 const IDLE_ANIMATION_MS = 30000;
 const IDLE_FPS = 24;
@@ -84,8 +93,31 @@ interface Seen {
   overlayOutput: SimOutput | null;
   overlayFrames: number;
   placing: boolean;
+  /** 反映済みの視点移動の番号（未反映は null） */
+  focusSeq: number | null;
+  userLocation: AppState['userLocation'] | undefined;
   terrainStatus: string;
   attribution: string;
+}
+
+/** カメラの移動アニメーション（注視点・距離・向きをそれぞれ補間する） */
+interface CamAnim {
+  fromTarget: Vector3;
+  toTarget: Vector3;
+  fromDist: number;
+  toDist: number;
+  /** 注視点からカメラへの向き（単位ベクトル） */
+  fromDir: Vector3;
+  toDir: Vector3;
+  /** 遠くへ移るとき途中で少し引く量 [m] */
+  hump: number;
+  t0: number;
+  dur: number;
+}
+
+/** 見やすさ倍率の表示用の丸め（10 未満は整数、それ以上は 5 刻み） */
+function scaleLabel(S: number): number {
+  return S < 10 ? Math.round(S) : Math.round(S / 5) * 5;
 }
 
 /** 計算結果の更新番号（sim の実装が revision を持つ場合のみ） */
@@ -111,6 +143,8 @@ export class View3D {
   private readonly buildings: BuildingLayer;
   private readonly people = new PeopleLayer();
   private readonly shelters = new ShelterLayer();
+  private readonly markers = new MarkerLayer();
+  private markersDirty = true;
   private sampler: HeightSampler | null = null;
   private frameSpec: GridSpec;
   private basemapTiles: TileCanvas | null = null;
@@ -130,7 +164,7 @@ export class View3D {
   private viewportH = 0;
   private ro: ResizeObserver | null = null;
   private readonly reducedMotion: boolean;
-  private camAnim: { fromPos: Vector3; fromTarget: Vector3; toPos: Vector3; toTarget: Vector3; t0: number; dur: number } | null = null;
+  private camAnim: CamAnim | null = null;
   private framed = false;
   private pointer = { x: 0, y: 0, inside: false };
   private hoverPending = false;
@@ -176,6 +210,8 @@ export class View3D {
       overlayOutput: null,
       overlayFrames: -1,
       placing: false,
+      focusSeq: null,
+      userLocation: undefined,
       terrainStatus: '',
       attribution: '',
     };
@@ -209,7 +245,7 @@ export class View3D {
     this.scene.add(this.env.sky, this.env.hemi, this.env.sun);
     this.world.add(this.env.outer, this.terrain.group, this.buildings.group);
     this.world.name = 'world';
-    this.scene.add(this.world, this.people.routes, this.shelters.group, this.people.group);
+    this.scene.add(this.world, this.people.routes, this.shelters.group, this.people.group, this.markers.group);
 
     // 操作
     const c = new OrbitControls(this.camera, r.domElement);
@@ -294,6 +330,7 @@ export class View3D {
     this.buildings.dispose();
     this.people.dispose();
     this.shelters.dispose();
+    this.markers.dispose();
     this.water.dispose();
     this.terrain.dispose();
     this.env.dispose();
@@ -305,6 +342,15 @@ export class View3D {
       this.renderer = null;
     }
     this.overlay.dispose();
+  }
+
+  /**
+   * 陸の浸水の色（'water' = 濁った水の色〔既定〕、'classes' = 2D 地図・凡例と同じ浸水深の色分け）。
+   * 画面の凡例（HUD）は 3D では水面の色の凡例を出さないので、'classes' を使うときは凡例側も合わせること。
+   */
+  setFloodColorMode(mode: FloodColorMode): void {
+    this.water.setFloodColorMode(mode);
+    this.touch();
   }
 
   /** テスト・デバッグ用の内部情報 */
@@ -322,6 +368,11 @@ export class View3D {
       basemap: this.basemapTiles ? { status: this.basemapTiles.status, zoom: this.basemapTiles.zoom, w: this.basemapTiles.canvas.width, h: this.basemapTiles.canvas.height } : null,
       people: this.people.count,
       camera: { x: this.camera.position.x, y: this.camera.position.y, z: this.camera.position.z, near: this.camera.near },
+      target: this.controls ? { x: this.controls.target.x, y: this.controls.target.y, z: this.controls.target.z } : null,
+      animating: !!this.camAnim,
+      focusSeq: this.seen.focusSeq,
+      markers: this.markers.hasContent,
+      waterUpdateMs: this.water.lastUpdateMs,
       viewport: [this.viewportW, this.viewportH],
     };
   }
@@ -364,10 +415,19 @@ export class View3D {
     const r = this.renderer!;
     LIGHT_UNIFORMS.uTime.value = now / 1000;
     this.camera.updateMatrixWorld();
+    const w = this.viewportW;
+    const h = this.viewportH;
+    const rects: [number, number, number, number][] = [];
     if (this.people.count > 0 && this.sampler && this.seen.grid) {
       // 選択リングの脈動などのため毎回更新（数人〜数十人なので軽い）
       this.updatePeople(now);
+      rects.push(...this.people.labelRects);
     }
+    const p11 = this.camera.projectionMatrix.elements[5];
+    this.markers.update(now, h, p11, !this.reducedMotion);
+    if (this.markers.hasContent) rects.push(...this.markers.screenRects(this.camera, w, h));
+    // 人物のラベル・目印に重なる避難場所のアイコンは薄くする
+    if (this.store.get().layers.shelters) this.shelters.declutter(rects, this.camera, w, h);
     r.render(this.scene, this.camera);
     this.needsRender = false;
     this.lastRender = now;
@@ -399,6 +459,10 @@ export class View3D {
       seen.overlayFrames = -1;
       seen.t = NaN;
       seen.attribution = '';
+      seen.userLocation = undefined;
+      // 目的地のピンも新しい格子の座標で置き直す（視点は動かさない）
+      if (grid && s.focus && seen.focusSeq === s.focus.seq) this.markers.setFocus(s.focus, this.sampler);
+      this.markersDirty = true;
       this.touch();
     }
 
@@ -408,6 +472,8 @@ export class View3D {
       this.world.scale.y = e;
       this.world.updateMatrixWorld(true);
       this.terrain.setExaggeration(e);
+      this.water.setExaggeration(e);
+      this.markersDirty = true;
       this.peopleDirty = true;
       this.sheltersDirty = true;
       this.cameraDirty = true;
@@ -420,6 +486,8 @@ export class View3D {
       this.basemapTiles?.dispose();
       this.basemapTiles = this.createTiles(grid, BASEMAPS[s.basemap], 17);
       this.terrain.setMap(this.basemapTiles.texture);
+      // 写真のときは建物の屋根にも写真の色を付ける（白い箱が並んで写真が隠れないように）
+      this.buildings.setMap(s.basemap === 'photo' ? this.basemapTiles.texture : null, 0.9);
       seen.attribution = '';
       this.touch();
     }
@@ -477,7 +545,9 @@ export class View3D {
       seen.simFlood = simFlood;
       const shown = simFlood ? output : null;
       if (this.water.update(shown, s.time.t, tide, String(s.sim.runId))) {
-        this.env.setSeaLevel(tide, this.water.edgeEta);
+        const spec = grid?.spec;
+        this.env.setSeaLevel(tide, this.water.edgeEta, spec ? { data: this.water.edgeProfile, nx: spec.nx, ny: spec.ny, dx: spec.dx } : null);
+        this.markersDirty = true;
         this.needsRender = true;
       }
       if (tChanged) {
@@ -533,6 +603,32 @@ export class View3D {
     if (this.sheltersDirty) {
       this.sheltersDirty = false;
       this.shelters.update(this.world.scale.y, this.scale, this.viewportH, this.camera.projectionMatrix.elements[5]);
+      this.needsRender = true;
+    }
+
+    // 現在地
+    if (s.userLocation !== seen.userLocation) {
+      seen.userLocation = s.userLocation;
+      this.markers.setUserLocation(s.userLocation, this.sampler);
+      this.markersDirty = true;
+      this.touch();
+    }
+    // 視点移動（地名検索・現在地など）。3D を表示していない間に変わったものは、表示したときに反映する。
+    // 地形の準備ができてから（地形の読み込み時の初期視点で上書きされないように）
+    const focus = s.focus;
+    if (focus && focus.seq !== seen.focusSeq && this.sampler && this.controls) {
+      seen.focusSeq = focus.seq;
+      this.markers.setFocus(focus, this.sampler);
+      this.markersDirty = true;
+      this.flyTo(focus);
+    } else if (!focus && this.markers.hasPin) {
+      // 視点移動の要求が取り消された（検索地点の目印を消す。視点はそのまま）
+      this.markers.setFocus(null, null);
+      this.needsRender = true;
+    }
+    if (this.markersDirty) {
+      this.markersDirty = false;
+      this.markers.place(this.sampler, this.world.scale.y, this.waterSurfaceAt);
       this.needsRender = true;
     }
 
@@ -707,7 +803,7 @@ export class View3D {
   // カメラ
   // ---------------------------------------------------------------------------
 
-  private initialCamera(): { pos: Vector3; target: Vector3 } {
+  private initialCamera(): { target: Vector3; dist: number; dir: Vector3 } {
     const t = lonLatToLocalMeters(this.frameSpec, INITIAL_CENTER.lon, INITIAL_CENTER.lat);
     const target = new Vector3(t.x, 0, t.z);
     const az = MathUtils.degToRad(INITIAL_AZIMUTH_DEG);
@@ -716,37 +812,87 @@ export class View3D {
     const aspect = this.viewportW > 0 && this.viewportH > 0 ? this.viewportW / this.viewportH : 1.6;
     const dist = INITIAL_DISTANCE * (aspect < 1.3 ? Math.min(1.9, 1.3 / aspect) : 1);
     const dir = new Vector3(Math.sin(az) * Math.sin(polar), Math.cos(polar), -Math.cos(az) * Math.sin(polar));
-    return { pos: target.clone().addScaledVector(dir, dist), target };
+    return { target, dist, dir };
   }
 
   private resetView(animate: boolean): void {
     if (!this.controls) return;
-    const { pos, target } = this.initialCamera();
-    if (!animate) {
-      this.camera.position.copy(pos);
-      this.controls.target.copy(target);
-      this.controls.update();
+    const { target, dist, dir } = this.initialCamera();
+    this.moveCamera(target, dist, dir, animate ? 900 : 0);
+  }
+
+  /**
+   * 注視点・距離・向きへカメラを移す（dur=0 または「動きを減らす」設定ではすぐに）。
+   * 位置を直線で補間すると、向きが変わるときに地面に近づいたり注視点がずれたりするので、
+   * 注視点・距離（対数）・向き（球面補間）を別々に補間する。
+   */
+  private moveCamera(target: Vector3, dist: number, dir: Vector3, dur: number): void {
+    const c = this.controls!;
+    const toDir = dir.clone().normalize();
+    if (dur <= 0 || this.reducedMotion) {
+      this.camAnim = null;
+      c.target.copy(target);
+      this.camera.position.copy(target).addScaledVector(toDir, dist);
+      c.update();
       this.cameraDirty = true;
       this.needsRender = true;
       return;
     }
+    const off = this.camera.position.clone().sub(c.target);
+    const fromDist = Math.max(1, off.length());
+    const travel = Math.hypot(target.x - c.target.x, target.z - c.target.z);
+    // 画面の外へ移るときは、途中で少し引いて全体の位置関係が分かるように
+    const hump = travel > 0.8 * Math.min(fromDist, dist) ? Math.min(travel * 0.3, 4000) : 0;
     this.camAnim = {
-      fromPos: this.camera.position.clone(),
-      fromTarget: this.controls.target.clone(),
-      toPos: pos,
-      toTarget: target,
+      fromTarget: c.target.clone(),
+      toTarget: target.clone(),
+      fromDist,
+      toDist: dist,
+      fromDir: off.normalize(),
+      toDir,
+      hump,
       t0: performance.now(),
-      dur: 900,
+      dur,
     };
     this.touch();
   }
+
+  /** 視点移動の要求（store.focus）: 注視点をその地点へ。zoom があれば 2D 地図のズームに相当する距離へ */
+  private flyTo(f: MapFocus): void {
+    const c = this.controls!;
+    const q = lonLatToLocalMeters(this.frameSpec, f.lon, f.lat);
+    const sm = this.sampler;
+    const ground = sm && sm.inside(q.x, q.z) ? Math.max(0, sm.height(q.x, q.z)) : 0;
+    const target = new Vector3(q.x, ground * this.world.scale.y, q.z);
+    const off = this.camera.position.clone().sub(c.target);
+    let dist = off.length();
+    if (f.zoom != null && Number.isFinite(f.zoom)) dist = this.distanceForZoom(f.zoom, f.lat);
+    dist = MathUtils.clamp(dist, FOCUS_MIN_DISTANCE, FOCUS_MAX_DISTANCE);
+    const travel = Math.hypot(target.x - c.target.x, target.z - c.target.z);
+    this.moveCamera(target, dist, off.normalize(), MathUtils.clamp(700 + travel * 0.25, 800, 1800));
+  }
+
+  /** 2D 地図のズーム → 同じくらいの範囲が見えるカメラ距離 [m] */
+  private distanceForZoom(zoom: number, lat: number): number {
+    const visible = Math.max(300, this.viewportH || 800) * metersPerPixel(lat, zoom);
+    return visible / (2 * Math.tan(MathUtils.degToRad(this.camera.fov / 2)));
+  }
+
+  private readonly animQ = new Quaternion();
+  private readonly animQ0 = new Quaternion();
+  private readonly animDir = new Vector3();
 
   private stepCameraAnim(now: number): boolean {
     const a = this.camAnim!;
     const f = Math.min(1, (now - a.t0) / a.dur);
     const e = f < 0.5 ? 4 * f * f * f : 1 - Math.pow(-2 * f + 2, 3) / 2;
-    this.camera.position.lerpVectors(a.fromPos, a.toPos, e);
-    this.controls!.target.lerpVectors(a.fromTarget, a.toTarget, e);
+    const c = this.controls!;
+    c.target.lerpVectors(a.fromTarget, a.toTarget, e);
+    this.animQ.setFromUnitVectors(a.fromDir, a.toDir);
+    this.animQ0.identity().slerp(this.animQ, e);
+    this.animDir.copy(a.fromDir).applyQuaternion(this.animQ0);
+    const dist = Math.exp(MathUtils.lerp(Math.log(a.fromDist), Math.log(a.toDist), e)) + a.hump * Math.sin(Math.PI * e);
+    this.camera.position.copy(c.target).addScaledVector(this.animDir, dist);
     if (f >= 1) this.camAnim = null;
     return true;
   }
@@ -781,7 +927,7 @@ export class View3D {
     cam.far = 300000;
     cam.updateProjectionMatrix();
     this.env.update(cam, dist);
-    // 見やすさ倍率（画面の高さ 800px のとき 距離 × 0.0105）
+    // 見やすさ倍率（画面の高さ 800px のとき 距離 × SCALE_PER_METER）
     const vh = Math.max(300, this.viewportH || 800);
     this.scale = MathUtils.clamp((dist * SCALE_PER_METER * 800) / vh, 1, MAX_SCALE);
     this.sheltersDirty = true;
@@ -800,12 +946,17 @@ export class View3D {
 
   private updateNote(): void {
     const exag = this.world.scale.y;
-    const S = this.scale;
-    const sx = S < 10 ? Math.round(S) : Math.round(S / 5) * 5;
+    const sx = scaleLabel(this.scale);
     const e = Number.isInteger(exag) ? String(exag) : exag.toFixed(1);
     this.overlay.setNote(
-      `高さ ×${e} 強調 ・ 人物 約×${sx} 表示`,
-      `地形・水面・建物の高さは実際の ${e} 倍に強調しています。\n人物と避難場所のピンは、見やすさのため実物（大人 約1.7m）の約 ${sx} 倍の大きさで表示しています（拡大はカメラの距離に応じて変わります）。\n浸水時に体が水に隠れる割合は、実際の水深と身長の比のとおりです。`,
+      sx <= 1 ? `高さ ×${e} 強調 ・ 人物はほぼ実寸` : `高さ ×${e} 強調 ・ 人物 ×${sx} 拡大`,
+      [
+        `地形・水面・建物の高さは実際の ${e} 倍に強調しています。`,
+        sx <= 1
+          ? '人物は、ほぼ実寸（大人 約1.7m）で表示しています。'
+          : `人物と避難場所のピンは、遠くからでも見えるよう実物（大人 約1.7m）の約 ${sx} 倍で表示しています。近づくほど実寸に近づきます（最大 ${MAX_SCALE} 倍）。`,
+        '浸水時に体が水に隠れる割合は、実際の水深と身長の比のとおりです。',
+      ].join('\n'),
     );
   }
 
@@ -933,8 +1084,11 @@ export class View3D {
     let tip: string | null = null;
     const id = this.people.pick(x, y, this.camera, this.viewportW, this.viewportH);
     if (id) {
-      const sx = this.scale < 10 ? Math.round(this.scale) : Math.round(this.scale / 5) * 5;
-      tip = `${this.people.describe(id) ?? ''}\n${sx <= 1 ? '※ 人物はほぼ実寸（約1.7m）で表示' : `※ 人物は見やすさのため実物の約 ×${sx} で表示`}`;
+      const sx = scaleLabel(this.scale);
+      tip = `${this.people.describe(id) ?? ''}\n${sx <= 1 ? '※ 人物はほぼ実寸（約1.7m）で表示' : `※ 人物は見やすさのため実物の約 ${sx} 倍で表示`}`;
+    } else if (this.markers.pickUser(x, y, this.camera, this.viewportW, this.viewportH)) {
+      const loc = s.userLocation!;
+      tip = `現在地（位置情報）\n精度 約 ${loc.accuracyM >= 1000 ? `${(loc.accuracyM / 1000).toFixed(1)} km` : `${Math.round(loc.accuracyM)} m`}${loc.insideDomain ? '' : '\n※ 計算範囲の外です'}`;
     } else if (s.layers.shelters) {
       const sh = this.shelters.pick(x, y, this.camera, this.viewportW, this.viewportH);
       if (sh) tip = ShelterLayer.describe(sh);

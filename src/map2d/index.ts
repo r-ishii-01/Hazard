@@ -5,6 +5,8 @@
  * - シミュレーション結果（現在の浸水・海面の偏差・引き波で露出した海底／最大浸水深／到達時間）は
  *   1セル = 1ピクセルのキャンバスを ImageSource に転送して表示する（グリッド四隅に正確に合わせる）。
  * - 避難場所・人物・避難経路・計算範囲を重ねる。人物は配置モードで地図クリックにより追加、ドラッグで移動。
+ * - 地名検索・現在地（store.focus の seq が増えたら、その地点へ移動。非表示中の要求は表示したときに反映）。
+ *   検索地点の一時的なピンと、現在地の点・精度の円を出す（locate.ts）。
  *
  * 描画は requestAnimationFrame にまとめ、時刻・レイヤー・データが変わったときだけ更新する。
  * 浸水画像の更新は最大 30 回/秒。
@@ -22,7 +24,7 @@ import {
 } from 'maplibre-gl';
 import type { AppStore } from '../core/store';
 import type { AppActions } from '../core/controller';
-import { CELL_SEA, type AppState, type Basemap, type CursorInfo, type SimOutput, type TerrainGrid } from '../core/types';
+import { CELL_SEA, type AppState, type Basemap, type CursorInfo, type MapFocus, type SimOutput, type TerrainGrid } from '../core/types';
 import { INITIAL_CENTER, INITIAL_ZOOM, createGridSpec, gridCornerCoordinates, lonLatToCell, type GridSpec } from '../core/geo';
 import { BASEMAPS, DEM_CREDIT_HTML } from '../data/sources';
 import { POIS, POI_ATTRIBUTION } from '../data/poi';
@@ -34,6 +36,8 @@ import { IDS, SIM_OPACITY, basemapLayer, basemapLayerId, buildStyle, domainGeoJS
 import { PeopleLayer, type PeopleContext } from './people';
 import { PoiLayer, ShelterLayer, createDomainLabel } from './shelters';
 import { registerHazardProtocol } from './hazardTiles';
+import { MAP_VIEW_BOUNDS, domainZoomForWidth } from './geo2d';
+import { LocationLayer } from './locate';
 // MapLibre v6 のワーカーは別ファイル。Vite の事前バンドル／本番ビルドでは既定の相対 URL が解決できないので、
 // Vite にワーカーとしてバンドルさせ、その URL を明示する。
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
@@ -44,10 +48,7 @@ registerHazardProtocol();
 type Coords = [[number, number], [number, number], [number, number], [number, number]];
 
 /** 表示できる範囲（計算範囲の周囲をゆったり） */
-const MAX_BOUNDS: [[number, number], [number, number]] = [
-  [139.25, 35.17],
-  [139.7, 35.47],
-];
+const MAX_BOUNDS = MAP_VIEW_BOUNDS;
 
 /** 浸水画像の最短更新間隔 [ms]（≦30 回/秒） */
 const FLOOD_INTERVAL_MS = 33;
@@ -96,6 +97,8 @@ interface Dirty {
   placing: boolean;
   cursor: boolean;
   attribution: boolean;
+  /** 現在地の精度の円 */
+  location: boolean;
 }
 
 const ALL_DIRTY = (): Dirty => ({
@@ -110,6 +113,7 @@ const ALL_DIRTY = (): Dirty => ({
   placing: true,
   cursor: false,
   attribution: true,
+  location: true,
 });
 
 export class MapView2D {
@@ -144,6 +148,12 @@ export class MapView2D {
   private people: PeopleLayer | null = null;
   private shelters: ShelterLayer | null = null;
   private pois: PoiLayer | null = null;
+  private location: LocationLayer | null = null;
+
+  // 視点の移動要求（地名検索・現在地）
+  private lastFocusSeq = 0;
+  /** 非表示の間に届いた要求（表示したときに反映） */
+  private pendingFocus: MapFocus | null = null;
 
   // マウス
   private mouse: { lon: number; lat: number } | null = null;
@@ -182,7 +192,7 @@ export class MapView2D {
         container: this.root,
         style: buildStyle(s.basemap, s.layers, gridCornerCoordinates(spec)),
         center: [INITIAL_CENTER.lon, INITIAL_CENTER.lat],
-        zoom: initialZoom(container.clientWidth),
+        zoom: domainZoomForWidth(container.clientWidth),
         minZoom: 11,
         maxZoom: 18,
         maxBounds: MAX_BOUNDS,
@@ -221,6 +231,15 @@ export class MapView2D {
     map.addControl(new AttributionControl({ compact: true, customAttribution: POIS.length ? POI_ATTRIBUTION : undefined }), 'bottom-right');
     this.collapseAttributionOnNarrow();
 
+    // 検索地点のピン・現在地の点（HTML マーカーはスタイルの読み込みを待たずに置ける）
+    this.location = new LocationLayer(map, () => actions.clearFocus());
+    this.location.setUserLocation(s.userLocation);
+    this.location.setFocus(s.focus);
+    if (s.focus && s.focus.seq > this.lastFocusSeq) {
+      this.lastFocusSeq = s.focus.seq;
+      this.pendingFocus = s.focus;
+    }
+
     map.on('error', this.onMapError);
     // 'load' は表示範囲のタイルが揃うまで待つので、スタイルの準備ができた時点で重ね合わせを始める
     map.once('style.load', () => {
@@ -230,6 +249,7 @@ export class MapView2D {
       this.shelters = new ShelterLayer(map);
       this.pois = new PoiLayer(map);
       this.pois.setData(POIS);
+      this.location?.resetCircle();
       this.dirty = ALL_DIRTY();
       this.schedule();
     });
@@ -257,6 +277,10 @@ export class MapView2D {
     if (active && this.map) {
       this.map.resize();
       if (!was) this.dirty = ALL_DIRTY();
+      // 3D 表示の間に届いた移動の要求は、表示したときにアニメーションなしで反映する
+      const f = this.pendingFocus;
+      this.pendingFocus = null;
+      if (f) this.moveToFocus(f, false);
       this.schedule();
     } else if (!active) {
       this.clearCursor();
@@ -276,6 +300,8 @@ export class MapView2D {
     this.people?.destroy();
     this.shelters?.destroy();
     this.pois?.destroy();
+    this.location?.destroy();
+    this.location = null;
     this.domainLabel?.remove();
     this.map?.remove();
     this.map = null;
@@ -321,7 +347,68 @@ export class MapView2D {
     }
     if (s.placing !== p.placing) d.placing = any = true;
     if (s.shelters !== p.shelters) d.shelters = any = true;
+    if (s.focus !== p.focus) this.onFocus(s.focus);
+    if (s.userLocation !== p.userLocation) {
+      this.location?.setUserLocation(s.userLocation);
+      d.location = any = true;
+    }
     if (any) this.schedule();
+  }
+
+  // -------------------------------------------------------------------------
+  // 視点の移動（地名検索・現在地）
+  // -------------------------------------------------------------------------
+
+  private onFocus(f: MapFocus | null): void {
+    this.location?.setFocus(f);
+    if (!f || f.seq <= this.lastFocusSeq) return;
+    this.lastFocusSeq = f.seq;
+    if (this.active && this.map) {
+      this.pendingFocus = null;
+      this.moveToFocus(f, true);
+    } else {
+      this.pendingFocus = f;
+    }
+  }
+
+  /** 指定地点へ移動（zoom の指定があればそのズーム、無ければ今のズームのまま） */
+  private moveToFocus(f: MapFocus, animate: boolean): void {
+    const map = this.map;
+    if (!map || !Number.isFinite(f.lon) || !Number.isFinite(f.lat)) return;
+    const zoom = Number.isFinite(f.zoom) ? (f.zoom as number) : map.getZoom();
+    const center: [number, number] = [f.lon, f.lat];
+    const offset = this.focusOffset();
+    // 動きを減らす設定（prefers-reduced-motion）ではアニメーションしない。
+    // （MapLibre の flyTo はこの設定のとき jumpTo になり offset が効かないので、時間 0 の easeTo を使う）
+    const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    try {
+      if (animate && !reduce) map.flyTo({ center, zoom, offset, maxDuration: 2500 });
+      else map.easeTo({ center, zoom, offset, duration: 0 });
+    } catch (e) {
+      this.logOnce('focus', e);
+    }
+  }
+
+  /**
+   * 「場所を探す」パネル（UI 担当、#hud .place-panel）が開いているときは、目的地がパネルに隠れないよう、
+   * 見えている部分の中央に来るようずらす（狭い画面: パネルは上端いっぱい → 下へ。広い画面: 右上 → 左へ）。
+   */
+  private focusOffset(): [number, number] {
+    try {
+      const panel = document.querySelector<HTMLElement>('#hud .place-panel');
+      if (!panel || panel.hidden) return [0, 0];
+      const root = this.root.getBoundingClientRect();
+      const r = panel.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return [0, 0];
+      if (root.width < 820) {
+        const covered = Math.min(root.height * 0.75, r.bottom - root.top);
+        return covered > 0 ? [0, Math.round(covered / 2)] : [0, 0];
+      }
+      const covered = Math.min(root.width * 0.6, root.right - r.left);
+      return covered > 0 ? [-Math.round(covered / 2), 0] : [0, 0];
+    } catch {
+      return [0, 0];
+    }
   }
 
   private schedule(): void {
@@ -362,6 +449,10 @@ export class MapView2D {
     if (d.placing) {
       d.placing = false;
       step('placing', () => this.applyPlacing(s));
+    }
+    if (d.location) {
+      d.location = false;
+      step('location', () => this.location?.applyCircle());
     }
     if (d.shelters) {
       d.shelters = false;
@@ -798,12 +889,6 @@ export class MapView2D {
     this.loggedErrors.add(key);
     console.warn(`[map2d] ${key}`, e);
   }
-}
-
-/** 幅の狭い画面（スマートフォン）では、幅 800px 相当の範囲が入るよう少し引いて表示する */
-function initialZoom(width: number): number {
-  if (!(width > 0) || width >= 800) return INITIAL_ZOOM;
-  return Math.max(12.5, INITIAL_ZOOM - Math.log2(800 / width));
 }
 
 /** 計算結果の更新番号（sim の実装が revision を持つ場合のみ） */

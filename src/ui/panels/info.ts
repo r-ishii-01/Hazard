@@ -7,6 +7,8 @@ import type { UIContext } from '../context';
 import { extLink, h, safeAttributionHTML } from '../dom';
 import { disclaimerBody } from '../disclaimer';
 import { icon } from '../icons';
+import { CSIS_CREDIT, CSIS_URL, GSI_API_NOTICE, GSI_MAPS_API_NOTE_URL, GSI_REVERSE_CREDIT, GSI_SEARCH_CREDIT } from '../geoSearch';
+import { GEO_PRIVACY_TEXT } from '../geolocate';
 import { arrivalLegend, depthLegend } from '../legends';
 import { sheltersInfoLine } from '../shelterInfo';
 import { DISAPORTAL_URL, FUJISAWA_TSUNAMI_HAZARDMAP_URL, GSI_DEM_TILE_URL, JMA_SHINDO_TABLE_URL, JMA_TSUNAMI_WARNING_URL, KANAGAWA_TSUNAMI_SHINSUI_URL } from '../links';
@@ -89,6 +91,19 @@ export function createInfoPanel(ctx: UIContext): HTMLElement {
         h('li', null, '津波浸水想定: ', safeAttributionHTML(HAZARD_TSUNAMI_TILES.attribution), '（', extLink(DISAPORTAL_URL, '重ねるハザードマップ'), '）'),
         h('li', { class: 'source-li-shelters' }, sheltersInfoLine(ctx, '避難場所')),
         h('li', null, '建物（3D）: ', safeAttributionHTML(OPENFREEMAP.attribution)),
+        h(
+          'li',
+          null,
+          '地名・住所の検索: ',
+          extLink(GSI_MAPS_API_NOTE_URL, GSI_SEARCH_CREDIT),
+          '（協力: ',
+          extLink(CSIS_URL, `${CSIS_CREDIT}「シンプルジオコーディング実験」`),
+          '）。人物の場所の住所の目安: ',
+          extLink(GSI_MAPS_API_NOTE_URL, GSI_REVERSE_CREDIT),
+          '。',
+          GSI_API_NOTICE,
+          `現在地（ブラウザの位置情報）は住所の問い合わせに使いません。${GEO_PRIVACY_TEXT}`,
+        ),
         h('li', null, '震度の解説: ', extLink(JMA_SHINDO_TABLE_URL, '気象庁「気象庁震度階級関連解説表」')),
         h('li', null, '津波警報・注意報: ', extLink(JMA_TSUNAMI_WARNING_URL, '気象庁「津波警報・注意報、津波情報、津波予報について」')),
         h('li', null, extLink(FUJISAWA_TSUNAMI_HAZARDMAP_URL, '藤沢市「津波ハザードマップ」')),

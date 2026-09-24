@@ -59,6 +59,7 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
   const { store, actions } = ctx;
 
   // ---- 左上: 経過時間・揺れ・警報・水位 ----------------------------------------
+  // 幅の狭い画面（< 820px）では、経過時間と水位を 1 つの帯にまとめ、警報は 1 行のチップ（タップで詳細）にする（hud.css）
   const timeValue = h('span', { class: 'hud-time-value' }, '0秒');
   const timeCard = h('div', { class: 'hud-card hud-time' }, h('span', { class: 'hud-label' }, '地震発生から'), timeValue);
 
@@ -68,16 +69,39 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
   const warnLabel = h('strong', { class: 'hud-warn-label' });
   const warnAction = h('span', { class: 'hud-warn-action' });
   const warnSub = h('span', { class: 'hud-warn-sub' });
-  const warnCard = h('div', { class: 'hud-card hud-warn', hidden: true }, icon('alert', 20), h('span', { class: 'hud-warn-text' }, warnLabel, warnAction, warnSub));
+  const warnNote = h('span', { class: 'hud-warn-note' });
+  const warnChev = h('span', { class: 'hud-warn-chev', 'aria-hidden': 'true' });
+  let warnExpanded = false;
+  const warnCard = h(
+    'button',
+    { type: 'button', class: 'hud-card hud-warn', hidden: true, 'aria-expanded': 'false' },
+    icon('alert', 20),
+    h('span', { class: 'hud-warn-text' }, warnLabel, warnAction, warnSub, warnNote),
+    warnChev,
+  );
+  const applyWarnExpanded = () => {
+    warnCard.classList.toggle('is-expanded', warnExpanded);
+    warnCard.setAttribute('aria-expanded', String(warnExpanded));
+    warnChev.replaceChildren(icon(warnExpanded ? 'chevronUp' : 'chevronDown', 16));
+  };
+  warnCard.addEventListener('click', () => {
+    warnExpanded = !warnExpanded;
+    applyWarnExpanded();
+  });
+  applyWarnExpanded();
 
   const levelValue = h('span', { class: 'hud-level-value' });
-  const levelTrend = h('span', { class: 'hud-level-trend' });
+  const levelArrow = h('span', { class: 'hud-level-arrow', 'aria-hidden': 'true' });
+  const levelWord = h('span', { class: 'hud-level-word' });
+  const levelTrend = h('span', { class: 'hud-level-trend' }, levelArrow, levelWord);
   const levelCard = h(
     'div',
     { class: 'hud-card hud-level', hidden: true },
-    h('span', { class: 'hud-label' }, '鵠沼海岸沖の水位（計算）'),
+    h('span', { class: 'hud-label' }, h('span', { class: 'hud-label-long' }, '鵠沼海岸沖の水位（計算）'), h('span', { class: 'hud-label-short', 'aria-hidden': 'true' }, '沖の水位（計算）')),
     h('span', { class: 'hud-level-row' }, levelValue, levelTrend),
   );
+  /** 経過時間と水位（狭い画面では 1 つの帯） */
+  const statusBar = h('div', { class: 'hud-status' }, timeCard, levelCard);
 
   // ---- 中央上: 計算・地形・配置モード ------------------------------------------
   const simFill = h('span', { class: 'progress-fill' });
@@ -124,7 +148,7 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
   // 上中央は 2D 地図側のヒント・通知が使うため、状態チップは下中央にまとめる。
   // 四隅は地図の操作部品（2D）・視点リセット・倍率の注記・出典（3D）が使うので、凡例は右端の中央に置く
   el.replaceChildren(
-    h('div', { class: 'hud-stack hud-tl' }, timeCard, shakeCard, warnCard, levelCard),
+    h('div', { class: 'hud-stack hud-tl' }, statusBar, shakeCard, warnCard),
     h('div', { class: 'hud-stack hud-bc' }, placingChip, simChip, terrainChip, approxChip, cursorChip),
     legend,
   );
@@ -154,6 +178,7 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
     const out = s.sim.output;
     const n = out ? safeCall(() => out.gauge.count(), 0) : 0;
     setHidden(levelCard, !out || n === 0);
+    statusBar.classList.toggle('has-level', !!out && n > 0);
     if (out && n > 0) {
       const g = out.gauge;
       const eta = interpolateSeries(g.t, g.eta, n, t);
@@ -161,12 +186,14 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
         setText(levelValue, formatTP(eta));
         const before = interpolateSeries(g.t, g.eta, n, Math.max(0, t - 20));
         const d = Number.isFinite(before) ? eta - before : 0;
-        setText(levelTrend, d > 0.03 ? '▲ 上昇中' : d < -0.03 ? '▼ 下降中' : '');
+        setText(levelArrow, d > 0.03 ? '▲' : d < -0.03 ? '▼' : '');
+        setText(levelWord, d > 0.03 ? '上昇中' : d < -0.03 ? '下降中' : '');
         levelTrend.dataset.dir = d > 0.03 ? 'up' : d < -0.03 ? 'down' : '';
       } else {
         const last = g.t[n - 1];
         setText(levelValue, '—');
-        setText(levelTrend, t > last ? '計算中' : '引き波で海底が露出');
+        setText(levelArrow, '');
+        setText(levelWord, t > last ? '計算中' : '引き波で海底が露出');
         levelTrend.dataset.dir = '';
       }
     }
@@ -200,6 +227,8 @@ export function mountHud(el: HTMLElement, ctx: UIContext): void {
         note = JMA_ISSUE_TARGET_NOTE;
       }
       setText(warnSub, sub);
+      // 詳細（タップ・クリックで開く）: 発表基準と、発表の時刻についての注記（気象庁）
+      setText(warnNote, [w.heightRange ? `発表基準: ${w.heightRange}` : '', note].filter(Boolean).join('\n'));
       warnCard.title = [w.label, w.heightRange, w.action, note].filter(Boolean).join('\n');
     }, true),
   );

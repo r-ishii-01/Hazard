@@ -9,6 +9,7 @@
 import { test as base, expect, type BrowserContext, type Page, type Route } from '@playwright/test';
 import { deflateSync } from 'node:zlib';
 import { BUILTIN_TSUNAMI_SHELTERS } from '../src/data/shelters';
+import { DOMAIN_BOUNDS } from '../src/core/geo';
 
 /** 「ご利用にあたって」の確認済みフラグ（src/ui/disclaimer.ts の DISCLAIMER_KEY と同じ値） */
 export const DISCLAIMER_KEY = 'kugenuma-disclaimer-v1';
@@ -104,6 +105,29 @@ const OPENFREEMAP_TILEJSON = JSON.stringify({
   maxzoom: 14,
 });
 
+/**
+ * 国土地理院 地名検索API の応答の代わり（GeoJSON の Feature の配列。実際の API と同じ形）。
+ * 検索語を名称に含むものを返す。並べ替えを確かめるため、計算範囲の外のものを先に並べている。
+ * 最後の 1 件は、名称に HTML を含む（画面に文字として出ること＝HTML として解釈されないことを確かめる）。
+ */
+const searchFeature = (lon: number, lat: number, title: string, addressCode: string, dataSource?: string) => ({
+  geometry: { coordinates: [lon, lat], type: 'Point' },
+  type: 'Feature',
+  properties: { addressCode, title, ...(dataSource ? { dataSource } : {}) },
+});
+export const SEARCH_FIXTURE = [
+  searchFeature(140.035019, 42.670551, '鵠沼海岸（遠方のテスト用地名）', ''),
+  searchFeature(139.5505, 35.319, '鵠沼海岸テスト（鎌倉市・計算範囲外）', '14204', '3'),
+  searchFeature(139.473022, 35.315491, '神奈川県藤沢市鵠沼海岸', ''),
+  searchFeature(139.471350527778, 35.3208555555556, '鵠沼海岸駅', '14205', '1'),
+  searchFeature(139.469331549775, 35.3181188396594, '鵠沼海岸二丁目', '14205', '5'),
+  searchFeature(139.4712, 35.3222, '<img src=x onerror="window.__xss=1">鵠沼海岸テスト施設', '14205', '3'),
+];
+/** 検索語「エラー」には 503 を返す（通信エラーの表示を確かめる） */
+export const SEARCH_ERROR_QUERY = 'エラー';
+/** 逆ジオコーダーの応答の代わり（計算範囲の中はすべて同じ町字） */
+export const REVERSE_FIXTURE = { results: { muniCd: '14205', lv01Nm: '鵠沼海岸二丁目' } };
+
 // ---------------------------------------------------------------------------
 // 外部通信の横取り
 // ---------------------------------------------------------------------------
@@ -133,6 +157,20 @@ function replyFor(url: URL): { reply: Reply; handling: ExternalRequest['handling
     if (path.startsWith('/xyz/relief/')) return png(PNG.relief);
   }
   if (host === 'disaportaldata.gsi.go.jp' && path.startsWith('/raster/')) return png(PNG.hazard);
+  // 国土地理院 地名検索API・逆ジオコーダー
+  if (host === 'msearch.gsi.go.jp' && path === '/address-search/AddressSearch') {
+    const q = (url.searchParams.get('q') ?? '').trim();
+    if (q === SEARCH_ERROR_QUERY) return { reply: { status: 503, contentType: 'text/plain', body: 'unavailable (e2e fixture)' }, handling: 'fixture' };
+    const hits = q ? SEARCH_FIXTURE.filter((f) => f.properties.title.includes(q)) : [];
+    return { reply: { contentType: 'application/json', body: JSON.stringify(hits) }, handling: 'fixture' };
+  }
+  if (host === 'mreversegeocoder.gsi.go.jp' && path === '/reverse-geocoder/LonLatToAddress') {
+    const lat = Number(url.searchParams.get('lat'));
+    const lon = Number(url.searchParams.get('lon'));
+    const b = DOMAIN_BOUNDS;
+    const inside = lon >= b.west && lon <= b.east && lat >= b.south && lat <= b.north;
+    return { reply: { contentType: 'application/json', body: JSON.stringify(inside ? REVERSE_FIXTURE : {}) }, handling: 'fixture' };
+  }
   if (host === 'tiles.openfreemap.org') {
     if (path.endsWith('.pbf')) return { reply: { contentType: 'application/x-protobuf', body: Buffer.alloc(0) }, handling: 'fixture' };
     return { reply: { contentType: 'application/json', body: OPENFREEMAP_TILEJSON }, handling: 'fixture' };

@@ -74,7 +74,32 @@
   }
 }
 
-/* 津波警報等 */
+/* 経過時間・水位（広い画面では別々のカード、狭い画面では 1 つの帯） */
+.hud-status {
+  display: contents;
+}
+
+.hud-time {
+  order: 0;
+}
+
+.hud-shake {
+  order: 1;
+}
+
+.hud-warn {
+  order: 2;
+}
+
+.hud-level {
+  order: 3;
+}
+
+.hud-label-short {
+  display: none;
+}
+
+/* 津波警報等（ボタン: 押すと発表基準などの詳細を開く） */
 .hud-warn {
   display: flex;
   align-items: center;
@@ -83,7 +108,43 @@
   background: var(--warn-bg);
   color: var(--warn-fg);
   border: 2px solid rgb(255 255 255 / 0.85);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  pointer-events: auto;
   animation: hud-in 260ms var(--ease);
+}
+
+.hud-warn:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+
+.hud-warn-chev {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+  margin-left: auto;
+  opacity: 0.8;
+}
+
+.hud-warn-note {
+  display: none;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+
+.hud-warn.is-expanded .hud-warn-note {
+  display: block;
+}
+
+.hud-warn.is-expanded .hud-warn-action {
+  display: block;
+  -webkit-line-clamp: unset;
 }
 
 .hud-warn-text {
@@ -159,6 +220,10 @@
 
 .hud-level-trend[data-dir="down"] {
   color: #7dd3fc;
+}
+
+.hud-level-arrow:not(:empty) {
+  margin-right: 0.3em;
 }
 
 /* チップ（中央上・下） */
@@ -252,14 +317,17 @@
 }
 
 
-/* 凡例（右端の中央。四隅は地図の操作部品・出典、下中央は状態チップが使う） */
+/*
+ * 凡例（右端の中央より少し下。右上は地図の操作部品と「場所を探す」ボタン、四隅は出典など、下中央は状態チップが使う）。
+ * 上端が 170px（ボタンの下）より上に来ないよう、中心を 40px 下げて高さを抑える。
+ */
 .hud-legend {
   position: absolute;
-  top: 50%;
+  top: calc(50% + 40px);
   right: var(--sp-3);
   display: grid;
   width: 176px;
-  max-height: calc(100% - 150px);
+  max-height: calc(100% - 260px);
   overflow: hidden;
   border: 1px solid rgb(15 27 45 / 0.14);
   border-radius: var(--radius);
@@ -387,41 +455,139 @@
     top: var(--sp-2);
     left: var(--sp-2);
     gap: 6px;
-    max-width: calc(100% - 64px);
+    /* 右上の地図の操作部品（ズーム・場所を探す）と重ならない幅 */
+    max-width: calc(100% - 70px);
   }
 
   .hud-card {
     padding: 6px 10px;
   }
 
-  .hud-time {
-    grid-auto-flow: column;
-    align-items: baseline;
-    gap: 6px;
+  /* 経過時間と水位を 1 つの帯に（ラベルは値の上に小さく） */
+  .hud-status {
+    display: flex;
+    align-items: stretch;
+    order: 0;
+    max-width: 100%;
+    border: 1px solid rgb(255 255 255 / 0.1);
+    border-radius: var(--radius);
+    background: rgb(8 23 45 / 0.88);
+    box-shadow: var(--shadow-hud);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+
+  .hud-status > .hud-card {
+    gap: 0;
+    min-width: 0;
+    padding: 4px 10px 5px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .hud-status > .hud-level {
+    border-left: 1px solid rgb(255 255 255 / 0.2);
+  }
+
+  .hud-status .hud-label {
+    font-size: 10.5px;
+    line-height: 1.3;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+
+  .hud-label-long {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+    clip: rect(0 0 0 0) !important;
+    white-space: nowrap !important;
+  }
+
+  .hud-label-short {
+    display: inline;
   }
 
   .hud-time-value {
-    font-size: 18px;
+    font-size: 17px;
+    line-height: 1.25;
+  }
+
+  .hud-level-row {
+    gap: 6px;
+  }
+
+  .hud-level-value {
+    font-size: 15px;
+    line-height: 1.25;
+    white-space: nowrap;
+  }
+
+  .hud-level-trend {
+    font-size: 11px;
+  }
+
+  /* 上昇・下降は矢印だけを見せる（文字は読み上げ用に残す） */
+  .hud-level-trend[data-dir="up"] .hud-level-word,
+  .hud-level-trend[data-dir="down"] .hud-level-word {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+    clip: rect(0 0 0 0) !important;
+    white-space: nowrap !important;
   }
 
   .hud-shake,
   .hud-warn {
     font-size: 13px;
-    padding: 6px 10px;
+    padding: 5px 10px;
+  }
+
+  .hud-shake {
+    gap: 6px;
+  }
+
+  /* 警報は 1 行のチップ。押すと、とるべき行動・発表の目安・発表基準を開く */
+  .hud-warn {
+    gap: 8px;
+    max-width: 100%;
+    border-width: 1.5px;
+  }
+
+  .hud-warn > .icon {
+    width: 18px;
+    height: 18px;
+    margin-top: 0;
+  }
+
+  .hud-warn.is-expanded {
+    align-items: flex-start;
+  }
+
+  .hud-warn.is-expanded > .icon {
+    margin-top: 2px;
   }
 
   .hud-warn-label {
-    font-size: 14.5px;
+    font-size: 14px;
+    line-height: 1.35;
+    white-space: nowrap;
   }
 
-  .hud-warn-action {
+  .hud-warn:not(.is-expanded) .hud-warn-action,
+  .hud-warn:not(.is-expanded) .hud-warn-sub {
     display: none;
   }
 
-  .hud-level-value {
-    font-size: 16px;
+  .hud-warn.is-expanded .hud-warn-chev {
+    align-self: flex-start;
   }
-
 
   .hud-chip {
     font-size: 12px;
@@ -452,7 +618,7 @@
   .hud-legend {
     right: var(--sp-2);
     width: 138px;
-    max-height: calc(100% - 120px);
+    max-height: calc(100% - 260px);
   }
 
   .hud-legend-toggle {

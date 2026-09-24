@@ -28,6 +28,11 @@ const PATHS = {
   cube: '<path d="M12 3.3l7.8 4.4v8.6L12 20.7l-7.8-4.4V7.7z"/><path d="M4.2 7.7L12 12l7.8-4.3M12 12v8.7"/>',
   crosshair: '<circle cx="12" cy="12" r="7.5"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/>',
   mountain: '<path d="M2.5 19.5L9 8.5l3.6 6 2.4-3.5 6.5 8.5z"/>',
+  search: '<circle cx="10.5" cy="10.5" r="6.2"/><path d="M15.2 15.2l5 5"/>',
+  locate:
+    '<circle cx="12" cy="12" r="6.6"/><circle cx="12" cy="12" r="2.3" fill="currentColor" stroke="none"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/>',
+  lock: '<rect x="5.2" y="10.5" width="13.6" height="9.5" rx="1.8"/><path d="M8.4 10.5V8a3.6 3.6 0 0 1 7.2 0v2.5"/>',
+  back: '<path d="M14.5 6.5L9 12l5.5 5.5"/>',
 } as const;
 
 export type IconName = keyof typeof PATHS;

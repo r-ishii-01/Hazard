@@ -1,7 +1,8 @@
 /**
  * 人物（3D の人形）・状態リング・ラベル・避難経路。
  *
- * - 人形は実寸（大人 約1.7 m）のモデルを「見やすさ倍率」S 倍に拡大して置く（S はカメラ距離で決まる）
+ * - 人形は実寸（大人 約1.7 m）のモデルを「見やすさ倍率」S 倍に拡大して置く（S はカメラ距離で決まる。上限あり）
+ * - 足元の状態の色の輪は、遠景で人形が小さくなっても見えるよう、画面上で最小の大きさを保つ
  * - 浸水中は、水深 / 身長 の割合だけ体が水面下に入るよう沈める（拡大しても割合は正しい）
  * - 経路は地面に沿った帯。通過済みは実線、これから進む部分は破線
  */
@@ -42,6 +43,11 @@ export const STATUS_LABELS: Record<PersonStatus, string> = {
   danger: PERSON_STATUS_INFO.danger?.label ?? '歩行困難（危険）',
   critical: PERSON_STATUS_INFO.critical?.label ?? '生命の危険',
 };
+
+/** 状態の輪の最小の大きさ（外径の半径）[CSS px] */
+const RING_MIN_PX = 7;
+/** 状態の輪の外径の半径 [m]（ringGeo の外径） */
+const RING_OUTER_M = 0.66;
 
 /** 小さいラベル用の短い状態名 */
 const STATUS_SHORT: Record<PersonStatus, string> = {
@@ -119,6 +125,8 @@ interface Entry {
   /** ピック用: 体の中心（ワールド座標）と頭上 */
   mid: Vector3;
   top: Vector3;
+  /** 重なりを避けるためにラベルを上へずらした量 [CSS px] */
+  labelShift: number;
 }
 
 export interface PeopleUpdateContext {
@@ -156,6 +164,8 @@ export class PeopleLayer {
   private readonly entries = new Map<string, Entry>();
   private readonly tmp = new Vector3();
   private laneSeq = 0;
+  /** 表示中のラベルの画面上の範囲 [x0, y0, x1, y1]（update のたびに更新。避難場所のアイコンを薄くする判定に使う） */
+  labelRects: [number, number, number, number][] = [];
 
   constructor() {
     this.selRing = new Mesh(this.selGeo, this.selMat);
@@ -237,6 +247,7 @@ export class PeopleLayer {
       state: null,
       mid: new Vector3(),
       top: new Vector3(),
+      labelShift: 0,
     };
     this.entries.set(p.id, e);
     return e;
@@ -404,7 +415,9 @@ export class PeopleLayer {
       e.body.material = selected ? this.bodySelMat : this.bodyMat;
       const ringY = surfaceY + 0.05 * S;
       e.ring.position.set(q.x, ringY, q.z);
-      e.ring.scale.setScalar(S);
+      // 遠景でも輪が見えるよう、画面上で RING_MIN_PX 以上に
+      const worldPerPx = (c.camera.position.distanceTo(e.ring.position) * 2) / (Math.max(1, c.viewportH) * c.p11);
+      e.ring.scale.setScalar(Math.max(S, (RING_MIN_PX * worldPerPx) / RING_OUTER_M));
       e.ringMat.color.set(STATUS_COLORS[st.status] ?? STATUS_COLORS.waiting);
       const headY = baseY + e.height * S;
       e.mid.set(q.x, baseY + e.height * S * 0.55, q.z);
@@ -443,13 +456,16 @@ export class PeopleLayer {
       this.selRing.visible = true;
       this.selRing.position.copy(sel.ring.position);
       this.selRing.position.y += 0.02 * S;
-      this.selRing.scale.setScalar(S * (1 + 0.08 * Math.sin(c.now / 220)));
+      this.selRing.scale.setScalar(sel.ring.scale.x * (1 + 0.08 * Math.sin(c.now / 220)));
     } else {
       this.selRing.visible = false;
     }
   }
 
-  /** ラベルの重なりを減らす（選択中・危険度の高い人を優先し、重なる低優先のラベルを隠す） */
+  /**
+   * ラベルの重なりを減らす。選択中・危険度の高い人から順に置き、先に置いたラベルと重なるときは
+   * 上へ1段・2段ずらして空いている所に置く（それでも重なる低優先のラベルだけ隠す。選択中は常に表示）
+   */
   private declutter(c: PeopleUpdateContext): void {
     const order = [...this.entries.values()];
     const sev: Record<string, number> = { critical: 5, danger: 4, caution: 3, evacuating: 2, waiting: 1, safe: 0 };
@@ -459,7 +475,11 @@ export class PeopleLayer {
       return sb - sa;
     });
     const placed: [number, number, number, number][] = [];
+    this.labelRects = placed;
     const v = this.tmp;
+    // 数 px の重なりは許す（ラベルの影・しっぽの分）
+    const pad = 3;
+    const free = (r: [number, number, number, number]) => !placed.some((p) => r[0] + pad < p[2] && r[2] - pad > p[0] && r[1] + pad < p[3] && r[3] - pad > p[1]);
     for (const e of order) {
       v.copy(e.top).project(c.camera);
       if (v.z > 1 || Math.abs(v.x) > 1.2 || Math.abs(v.y) > 1.2) {
@@ -468,11 +488,19 @@ export class PeopleLayer {
       }
       const sx = (v.x * 0.5 + 0.5) * c.viewportW;
       const sy = (-v.y * 0.5 + 0.5) * c.viewportH;
-      const r: [number, number, number, number] = [sx - e.label.boxW / 2, sy - e.label.boxH, sx + e.label.boxW / 2, sy];
-      const hit = placed.some((p) => r[0] < p[2] && r[2] > p[0] && r[1] < p[3] && r[3] > p[1]);
-      const keep = !hit || e.person.id === c.selectedId;
-      e.label.sprite.visible = keep;
-      if (keep) placed.push(r);
+      const w = e.label.boxW;
+      const h = e.label.boxH;
+      const selected = e.person.id === c.selectedId;
+      let shift = -1;
+      for (let step = 0; step < 3 && shift < 0; step++) {
+        const dy = step * (h + 2);
+        if (free([sx - w / 2, sy - h - dy, sx + w / 2, sy - dy])) shift = dy;
+      }
+      if (shift < 0 && selected) shift = 0;
+      e.label.sprite.visible = shift >= 0;
+      e.labelShift = Math.max(0, shift);
+      e.label.sprite.center.y = -e.labelShift / e.label.cssH;
+      if (shift >= 0) placed.push([sx - w / 2, sy - h - shift, sx + w / 2, sy - shift]);
     }
   }
 
@@ -495,7 +523,8 @@ export class PeopleLayer {
       const ty = (-v.y * 0.5 + 0.5) * h;
       const dBody = Math.hypot(px - sx, py - sy);
       // ラベル（頭上の吹き出し）
-      const inLabel = e.label.sprite.visible && Math.abs(px - tx) < e.label.boxW / 2 && py < ty + 2 && py > ty - e.label.boxH;
+      const ly = ty - e.labelShift;
+      const inLabel = e.label.sprite.visible && Math.abs(px - tx) < e.label.boxW / 2 && py < ly + 2 && py > ly - e.label.boxH;
       const d = inLabel ? 0 : dBody;
       if (d < 22 && d < bestD) {
         bestD = d;

@@ -1,5 +1,6 @@
 /**
- * 「人物」タブ: 人物の配置、一覧（状態をおよそ 4 Hz で更新）、選択中の人物の詳細と浸水深グラフ。
+ * 「人物」タブ: 人物の配置（地図のクリック・地名検索・現在地）、一覧（状態をおよそ 4 Hz で更新）、
+ * 選択中の人物の詳細（住所の目安を含む）と浸水深グラフ。
  */
 import type { AppState, EvacMode, EvacPlan, Person, PersonKind, PersonState, PersonStatus, ShelterKind, SimOutput, TerrainGrid } from '../../core/types';
 import { CELL_SEA } from '../../core/types';
@@ -13,6 +14,9 @@ import { icon } from '../icons';
 import { niceTicks, timeTickStep } from '../series';
 import { sheltersInfoLine } from '../shelterInfo';
 import { STATUS_ORDER, statusDescription, statusMeta, statusSeverity, thresholdInfos, type ThresholdInfo } from '../status';
+import { GSI_MAPS_API_NOTE_URL, GSI_REVERSE_CREDIT } from '../geoSearch';
+import { GEO_PRIVACY_TEXT } from '../geolocate';
+import type { AddressState } from '../personAddress';
 
 const EVAC_LABEL: Record<EvacMode, string> = {
   stay: 'その場にとどまる',
@@ -40,6 +44,21 @@ function stateAt(p: Person, s: AppState, t: number): PersonState | null {
   } catch (e) {
     console.warn('[ui] personStateAt failed', e);
     return null;
+  }
+}
+
+/** 人物の場所の住所の目安の表示（無ければ null） */
+function addressText(st: AddressState | undefined): { text: string; src: boolean } | null {
+  if (!st) return null;
+  switch (st.status) {
+    case 'ok':
+      return { text: `${st.label}付近`, src: true };
+    case 'pending':
+      return { text: '住所の目安を調べています…', src: false };
+    case 'private':
+      return { text: '現在地から置いた人物（住所は調べていません）', src: false };
+    default:
+      return null;
   }
 }
 
@@ -106,10 +125,19 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
     }, true),
   );
 
+  // ---- 地名・住所の検索、現在地から置く ------------------------------------------------
+  const entry = h(
+    'div',
+    { class: 'place-entry' },
+    h('button', { type: 'button', class: 'btn btn-secondary', onclick: () => ctx.places.openSearch() }, icon('search', 16), '地名・住所で探して置く'),
+    h('button', { type: 'button', class: 'btn btn-secondary', onclick: () => ctx.places.locate() }, icon('locate', 16), '現在地に置く'),
+  );
+  const entryNote = h('p', { class: 'place-entry-note' }, icon('lock', 14), h('span', null, GEO_PRIVACY_TEXT));
+
   // ---- 一覧 -----------------------------------------------------------------
   const list = h('ul', { class: 'people-list', 'aria-label': '配置した人物' });
   const empty = h('p', { class: 'empty-state' }, 'まだ人物がいません。上のボタンを押してから、地図上をクリックして配置してください。');
-  const rows = new Map<string, { li: HTMLElement; btn: HTMLButtonElement; name: HTMLElement; sub: HTMLElement; chip: HTMLElement; dot: HTMLElement }>();
+  const rows = new Map<string, { li: HTMLElement; btn: HTMLButtonElement; name: HTMLElement; sub: HTMLElement; addr: HTMLElement; chip: HTMLElement; dot: HTMLElement }>();
   const count = h('span', { class: 'count-badge' }, '0');
 
   let clearArmed = 0;
@@ -149,15 +177,18 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
         const dot = h('span', { class: 'kind-dot small', 'aria-hidden': 'true' }, icon('user', 14));
         const name = h('span', { class: 'person-name' });
         const sub = h('span', { class: 'person-sub' });
-        const btn = h('button', { type: 'button', class: 'person-select', 'aria-pressed': 'false', onclick: () => actions.selectPerson(store.get().selectedPersonId === p.id ? null : p.id) }, dot, h('span', { class: 'person-text' }, name, sub));
+        const addr = h('span', { class: 'person-sub-addr' });
+        const btn = h('button', { type: 'button', class: 'person-select', 'aria-pressed': 'false', onclick: () => actions.selectPerson(store.get().selectedPersonId === p.id ? null : p.id) }, dot, h('span', { class: 'person-text' }, name, sub, addr));
         const chip = statusChip();
         const li = h('li', { class: 'person-row', dataset: { id: p.id } }, btn, chip);
-        row = { li, btn, name, sub, chip, dot };
+        row = { li, btn, name, sub, addr, chip, dot };
         rows.set(p.id, row);
       }
       row.dot.style.setProperty('--kind', profileColor(p.kind));
       setText(row.name, p.name);
       setText(row.sub, `${PERSON_PROFILES[p.kind]?.label ?? p.kind}・${EVAC_LABEL[p.evacMode]}`);
+      const at = addressText(ctx.places.addresses.get(p.id));
+      setText(row.addr, at?.src ? at.text : '');
       if (list.children[idx] !== row.li) list.insertBefore(row.li, list.children[idx] ?? null);
     });
     for (const [id, row] of rows) {
@@ -196,6 +227,7 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
   ctx.scope.add(store.select((s) => s.plans, () => throttled()));
   ctx.scope.add(store.select((s) => s.sim.output, () => throttled()));
   ctx.scope.add(store.select((s) => s.people, renderList, true));
+  ctx.scope.add(ctx.places.addresses.subscribe(() => renderList(store.get().people)));
   ctx.scope.add(store.select((s) => s.selectedPersonId, (id) => renderSelection(id), true));
   ctx.onPanelShow('people', updateStatuses);
 
@@ -221,6 +253,8 @@ export function createPeoplePanel(ctx: UIContext): HTMLElement {
       h('p', { class: 'section-lead' }, '種類を選んで地図上をクリックすると、地震発生時にその場所にいた人を置けます。避難の様子と、その場所の浸水の深さを確かめられます。'),
       h('div', { class: 'place-grid', role: 'group', 'aria-label': '配置する人物の種類' }, placeButtons),
       hint,
+      entry,
+      entryNote,
       sheltersInfoLine(ctx, '避難先の避難場所'),
     ),
     h(
@@ -348,8 +382,21 @@ function createDetail(ctx: UIContext): Detail {
       nameInput,
       close,
     );
+    // 住所の目安（国土地理院 逆ジオコーダー。現在地から置いた人物は調べない）
+    const addrText = h('span');
+    const addrSrc = h('span', { class: 'person-address-src' }, '（住所の目安: ', extLink(GSI_MAPS_API_NOTE_URL, GSI_REVERSE_CREDIT), '）');
+    const addrLine = h('p', { class: 'person-address', hidden: true }, icon('pin', 14), h('span', null, addrText, addrSrc));
+    const renderAddress = () => {
+      const at = addressText(ctx.places.addresses.get(person.id));
+      setHidden(addrLine, !at);
+      setText(addrText, at?.text ?? '');
+      setHidden(addrSrc, !at?.src);
+    };
+    child.add(ctx.places.addresses.subscribe(renderAddress));
+    renderAddress();
     el.append(
       header,
+      addrLine,
       h('div', { class: 'detail-status' }, chip, h('span', { class: 'detail-msg small muted' })),
       fields,
       h('h3', { class: 'group-title' }, '避難の見通し（計算上）'),

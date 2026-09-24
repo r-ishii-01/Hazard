@@ -107,7 +107,37 @@ const CSS = `
 }
 .m2d-person--critical .m2d-person__disc::after { animation-duration: .8s; }
 @keyframes m2d-pulse { from { transform: scale(1); opacity: .9; } to { transform: scale(1.9); opacity: 0; } }
+/* 地名検索で選んだ場所の目印 */
+.m2d-search { display: flex; flex-direction: column; align-items: center; pointer-events: none; }
+.m2d-search__label {
+  display: flex; align-items: center; gap: 2px; max-width: 220px; margin-bottom: 2px; padding: 2px 2px 2px 8px;
+  border-radius: 999px; background: rgba(15,23,42,.9); color: #fff; font-size: 12px; font-weight: 700; line-height: 1.35;
+  box-shadow: 0 1px 4px rgba(0,0,0,.35); pointer-events: auto;
+}
+.m2d-search__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.m2d-search__close {
+  flex: none; width: 22px; height: 22px; border: 0; border-radius: 50%; background: transparent; color: #fff;
+  font: 700 15px/1 system-ui, sans-serif; cursor: pointer; display: grid; place-items: center;
+}
+.m2d-search__close:hover { background: rgba(255,255,255,.18); }
+.m2d-search__close:focus-visible { outline: 2px solid #38bdf8; outline-offset: 1px; }
+.m2d-search__pin { width: 32px; height: 42px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.4)); }
+.m2d-search__pin svg { display: block; }
+
+/* 現在地 */
+.m2d-userloc { width: 22px; height: 22px; display: grid; place-items: center; pointer-events: auto; cursor: default; }
+.m2d-userloc__dot {
+  position: relative; width: 16px; height: 16px; border-radius: 50%; background: #2563eb; border: 3px solid #fff;
+  box-sizing: border-box; box-shadow: 0 1px 4px rgba(0,0,0,.45);
+}
+.m2d-userloc__dot::after {
+  content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid #2563eb; opacity: 0;
+  animation: m2d-userloc 1.8s ease-out infinite;
+}
+@keyframes m2d-userloc { from { transform: scale(.8); opacity: .8; } to { transform: scale(2.2); opacity: 0; } }
+
 @media (prefers-reduced-motion: reduce) {
+  .m2d-userloc__dot::after { animation: none; }
   .m2d-person--danger .m2d-person__disc::after, .m2d-person--critical .m2d-person__disc::after { animation: none; transform: scale(1.35); opacity: .6; }
   .m2d-toast { transition: none; }
 }

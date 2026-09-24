@@ -21,6 +21,8 @@ export interface TabBridge {
   isVisible(id: TabId): boolean;
   onShow(id: TabId, fn: () => void): void;
   collapse(): void;
+  /** タブを表示する（モバイルではシートを開く） */
+  show(id: TabId): void;
 }
 
 export function mountSidebar(el: HTMLElement, ctx: UIContext, mobile: MediaQueryList, bridge: TabBridge): void {
@@ -96,6 +98,7 @@ export function mountSidebar(el: HTMLElement, ctx: UIContext, mobile: MediaQuery
   bridge.collapse = () => {
     if (mobile.matches) setOpen(false);
   };
+  bridge.show = (id) => activate(id, true);
 
   // パネルの中身（タブ切り替え時の再生成はしない）
   const factories: Record<TabId, (c: UIContext) => HTMLElement> = {

@@ -5,6 +5,7 @@ import type { AppStore } from '../core/store';
 import type { AppActions } from '../core/controller';
 import type { AppState, SimOutput } from '../core/types';
 import type { Scope } from './dom';
+import type { AddressBook } from './personAddress';
 import { summarizeArrays, type OutputSummary } from './series';
 
 export type TabId = 'quake' | 'people' | 'layers' | 'info';
@@ -27,6 +28,20 @@ export interface UIContext {
   isMobile(): boolean;
   /** モバイルのボトムシートを閉じる（地図を操作させたい時） */
   collapseSheet(): void;
+  /** タブを表示する（モバイルではボトムシートを開く） */
+  showPanel(id: TabId): void;
+  /** 地名・住所の検索、現在地、人物の住所の目安 */
+  places: PlaceServices;
+}
+
+/** 場所に関する機能（地図の上の「場所を探す」ボタンと、人物タブから使う） */
+export interface PlaceServices {
+  /** 地名・住所の検索を開き、入力欄にフォーカスする */
+  openSearch(): void;
+  /** 現在地を取得する（利用者の操作からだけ呼ぶこと） */
+  locate(): void;
+  /** 人物の場所の住所の目安（国土地理院 逆ジオコーダー。現在地から置いた人物は調べない） */
+  addresses: AddressBook;
 }
 
 /** 表示中のタイムラインの長さ [秒] */

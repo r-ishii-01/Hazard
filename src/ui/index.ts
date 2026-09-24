@@ -6,12 +6,14 @@
  */
 import type { AppStore } from '../core/store';
 import type { AppActions } from '../core/controller';
-import { OutputWatcher, type TabId, type UIContext } from './context';
+import { OutputWatcher, type PlaceServices, type TabId, type UIContext } from './context';
 import { createDisclaimer } from './disclaimer';
 import { Scope, h } from './dom';
 import { mountHeader } from './header';
 import { mountHud } from './hud';
 import { mountKeys } from './keys';
+import { mountMapTools } from './mapTools';
+import { createAddressBook } from './personAddress';
 import { mountShake } from './shake';
 import { mountSidebar, type TabBridge } from './sidebar';
 import { mountTimeline } from './timeline';
@@ -65,6 +67,13 @@ export function mountUI(root: HTMLElement, store: AppStore, actions: AppActions)
     isVisible: () => true,
     onShow: () => {},
     collapse: () => {},
+    show: () => {},
+  };
+  // 地図の上の「場所を探す」ボタン（HUD の後に作る）が中身を差し込む
+  const places: PlaceServices = {
+    openSearch: () => {},
+    locate: () => {},
+    addresses: createAddressBook(store, scope),
   };
   const ctx: UIContext = {
     store,
@@ -77,6 +86,8 @@ export function mountUI(root: HTMLElement, store: AppStore, actions: AppActions)
     announce,
     isMobile: () => mobile.matches,
     collapseSheet: () => bridge.collapse(),
+    showPanel: (id: TabId) => bridge.show(id),
+    places,
   };
 
   root.classList.add('ui-ready');
@@ -84,6 +95,9 @@ export function mountUI(root: HTMLElement, store: AppStore, actions: AppActions)
   mountHeader(header, ctx);
   mountSidebar(sidebar, ctx, mobile, bridge);
   mountHud(hud, ctx);
+  const tools = mountMapTools(hud, ctx);
+  places.openSearch = tools.openSearch;
+  places.locate = tools.locate;
   mountTimeline(timeline, ctx);
   mountShake(ctx, stage);
   mountKeys(ctx);

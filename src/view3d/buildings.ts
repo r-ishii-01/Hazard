@@ -105,6 +105,8 @@ export class BuildingLayer {
   /** 足元の色分け（グリッドに合わせたテクスチャ。u=東向き, v=南向き） */
   private readonly empty = new DataTexture(new Uint8Array(4), 1, 1, RGBAFormat);
   private readonly tint = {
+    uMap: { value: this.empty as Texture },
+    uMapOn: { value: 0 },
     uOv: { value: this.empty as Texture },
     uOvOn: { value: 0 },
     uHz: { value: this.empty as Texture },
@@ -127,22 +129,30 @@ export class BuildingLayer {
     this.material.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, this.tint);
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nuniform vec2 uOvScale;\nvarying vec2 vOvUv;')
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvOvUv = position.xz * uOvScale + 0.5;');
+        .replace('#include <common>', '#include <common>\nuniform vec2 uOvScale;\nvarying vec2 vOvUv;\nvarying float vUp;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvOvUv = position.xz * uOvScale + 0.5;\nvUp = normal.y;');
       shader.fragmentShader = shader.fragmentShader
         .replace(
           '#include <common>',
-          '#include <common>\nuniform sampler2D uOv;\nuniform float uOvOn;\nuniform sampler2D uHz;\nuniform float uHzOn;\nvarying vec2 vOvUv;',
+          '#include <common>\nuniform sampler2D uMap;\nuniform float uMapOn;\nuniform sampler2D uOv;\nuniform float uOvOn;\nuniform sampler2D uHz;\nuniform float uHzOn;\nvarying vec2 vOvUv;\nvarying float vUp;',
         )
         .replace(
           '#include <color_fragment>',
           [
             '#include <color_fragment>',
+            // 写真: 屋根はその場所の写真の色、壁は写真の色を少しだけ混ぜる（白い箱ばかりにならないように）
+            'if (uMapOn > 0.0) { vec4 m = texture2D(uMap, vOvUv); float roof = smoothstep(0.5, 0.9, vUp); vec3 c = mix(mix(diffuseColor.rgb, m.rgb * 0.9, 0.35), m.rgb * 1.08, roof); diffuseColor.rgb = mix(diffuseColor.rgb, c, uMapOn * m.a); }',
             'if (uOvOn > 0.0) { vec4 ov = texture2D(uOv, vOvUv); diffuseColor.rgb = mix(diffuseColor.rgb, ov.rgb, ov.a * uOvOn); }',
             'if (uHzOn > 0.0) { vec4 hz = texture2D(uHz, vOvUv); diffuseColor.rgb = mix(diffuseColor.rgb, hz.rgb, hz.a * uHzOn); }',
           ].join('\n'),
         );
     };
+  }
+
+  /** 背景地図（写真）のテクスチャ（グリッドの範囲に貼ったもの）。屋根・壁に色を付ける。null で消す */
+  setMap(tex: Texture | null, strength: number): void {
+    this.tint.uMap.value = tex ?? this.empty;
+    this.tint.uMapOn.value = tex ? strength : 0;
   }
 
   /** 最大浸水深・到達時間の色（グリッドと同じ大きさのテクスチャ、sRGB）。null で消す */

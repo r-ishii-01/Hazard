@@ -53,6 +53,8 @@ export interface AppActions {
   setExaggeration(x: number): void;
   /** 2D 地図・3D ビューの視点を指定地点へ移す */
   focusOn(lon: number, lat: number, opts?: { zoom?: number; label?: string }): void;
+  /** 視点を移す要求を取り消す（focus を null に。2D 地図の検索地点の目印も消える。視点はそのまま） */
+  clearFocus(): void;
   /** 現在地を設定（null で消去） */
   setUserLocation(loc: UserLocation | null): void;
   reloadTerrain(resolution?: Resolution): void;
@@ -102,6 +104,8 @@ export function createController(store: Store<AppState>): AppActions {
   const runner = new SimRunner();
   let terrainAbort: AbortController | null = null;
   let personSeq = 0;
+  /** 視点移動の要求の通し番号（clearFocus の後も戻らない） */
+  let focusSeq = 0;
   let lastFrame = 0;
   let rafId = 0;
   /** 地形の読み込みが終わったら実行するシミュレーション */
@@ -391,8 +395,11 @@ export function createController(store: Store<AppState>): AppActions {
     setCursor: (cursor) => store.set({ cursor }),
     setExaggeration: (exaggeration) => store.set({ exaggeration }),
     focusOn: (lon, lat, opts = {}) => {
-      const seq = (store.get().focus?.seq ?? 0) + 1;
-      store.set({ focus: { lon, lat, zoom: opts.zoom, label: opts.label, seq } });
+      focusSeq = Math.max(focusSeq, store.get().focus?.seq ?? 0) + 1;
+      store.set({ focus: { lon, lat, zoom: opts.zoom, label: opts.label, seq: focusSeq } });
+    },
+    clearFocus: () => {
+      if (store.get().focus) store.set({ focus: null });
     },
     setUserLocation: (userLocation) => store.set({ userLocation }),
     reloadTerrain,

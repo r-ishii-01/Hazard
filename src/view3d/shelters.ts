@@ -26,6 +26,7 @@ export class ShelterLayer {
   private poles: InstancedMesh | null = null;
   private readonly icons = new Map<ShelterKind, { tex: CanvasTexture; mat: SpriteMaterial }>();
   private sprites: Sprite[] = [];
+  private readonly v = new Vector3();
   private shelters: Shelter[] = [];
   private local: { x: number; z: number; g: number }[] = [];
   private readonly m = new Matrix4();
@@ -34,6 +35,7 @@ export class ShelterLayer {
     this.group.name = 'shelters';
   }
 
+  /** アイコンのテクスチャは種類ごとに共有し、マテリアルは1つずつ（重なったアイコンだけ薄くするため） */
   private iconFor(kind: ShelterKind): SpriteMaterial {
     let ic = this.icons.get(kind);
     if (!ic) {
@@ -42,7 +44,7 @@ export class ShelterLayer {
       ic = { tex, mat };
       this.icons.set(kind, ic);
     }
-    return ic.mat;
+    return ic.mat.clone();
   }
 
   set(shelters: Shelter[], sampler: HeightSampler | null): void {
@@ -89,6 +91,25 @@ export class ShelterLayer {
     this.poles.instanceMatrix.needsUpdate = true;
   }
 
+  /**
+   * 人物のラベル・目印（rects、画面座標 [x0, y0, x1, y1]）に重なるアイコンを薄くする。
+   * ラベルの方が手前に描かれるので、重なったアイコンが文字を読みにくくしないように。
+   */
+  declutter(rects: [number, number, number, number][], camera: Camera, w: number, h: number): void {
+    const v = this.v;
+    for (const sp of this.sprites) {
+      let hit = false;
+      if (rects.length > 0) {
+        v.copy(sp.position).project(camera);
+        const sx = (v.x * 0.5 + 0.5) * w;
+        const sy = (-v.y * 0.5 + 0.5) * h;
+        const r = [sx - ICON_PX / 2, sy - ICON_PX, sx + ICON_PX / 2, sy];
+        hit = v.z <= 1 && rects.some((p) => r[0] < p[2] && r[2] > p[0] && r[1] < p[3] && r[3] > p[1]);
+      }
+      (sp.material as SpriteMaterial).opacity = hit ? 0.3 : 1;
+    }
+  }
+
   /** 画面座標に近い避難場所 */
   pick(px: number, py: number, camera: Camera, w: number, h: number): Shelter | null {
     const v = new Vector3();
@@ -122,7 +143,10 @@ export class ShelterLayer {
       this.poles.dispose();
       this.poles = null;
     }
-    for (const sp of this.sprites) this.group.remove(sp);
+    for (const sp of this.sprites) {
+      this.group.remove(sp);
+      sp.material.dispose();
+    }
     this.sprites = [];
     this.shelters = [];
     this.local = [];
