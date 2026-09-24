@@ -11,16 +11,19 @@
  *    第1波の山が海岸に届くまでの時間も最後の試算から測り、到達時間 arrivalMin に山が届くよう
  *    境界での入力開始時刻をずらす（海底地形からの伝播時間 ∫ds/√(gh) は試算時間の見積もりと予備に使う）。
  * 3. 本計算: 指定解像度の格子で計算し、frameInterval 秒ごとに全水深（cm, Uint16）を出力。
- *    波が境界に入る前の海は厳密に静止しているので、その間は計算せずフレーム 0 と同じとする
- *    （潮位より低い陸が海に接していて静止でない場合は t = 0 から計算する）。
+ *    初期状態では、海と、潮位より低く海とつながる土地（潮間帯）を潮位で静止した水域とし、それ以外の陸は乾燥とする。
+ *    波が境界に入る前の海は厳密に静止しているので、その間は計算せずフレーム 0 と同じとする。
  *
  * 注意: 境界から入れる波は正弦波列による単純化したモデルで、公式の津波浸水想定の再現・予測ではない。
  */
 import type { GridSpec } from '../core/geo';
 import { CELL_SEA, type SimParams } from '../core/types';
-import { ShallowWaterSolver, maxStillDepth, stableTimeStep, type SolverGrid } from './solver';
-import { firstCrestOffset, makeIncidentWave } from './wave';
+import { ShallowWaterSolver, initialWaterMask, maxStillDepth, sideBoundaryProfile, stableTimeStep, type SideProfile, type SolverGrid } from './solver';
+import { partitionRows, rowWorkWeights, type BandSpec, type WetMap } from './band';
+import { firstCrestOffset, makeIncidentWave, type IncidentWaveSpec } from './wave';
 import { coastSegment, decimateGrid, findGaugeCell, openSeaMask, percentile, travelTimeToSegment } from './site';
+import { UNSTABLE_MESSAGE, progressMessage } from './common';
+export { UNSTABLE_MESSAGE, progressMessage } from './common';
 
 export interface EngineInput {
   spec: GridSpec;
@@ -69,6 +72,12 @@ export interface EnginePerf {
   mainMs: number;
   calibrationMs: number;
   stepsPerSec: number;
+  /** 本計算を分けた帯（ワーカー）の数 */
+  bands: number;
+  /** 並列計算で隣の帯を待った時間 [ms]（帯ごと。逐次計算では省略） */
+  waitMs?: number;
+  /** 帯ごとの記録（並列計算のみ） */
+  perBand?: { activeCells: number; mainMs: number; waitMs: number }[];
 }
 
 export interface EngineSink {
@@ -86,6 +95,8 @@ export interface EngineOptions {
   now?: () => number;
   /** 校正の試算の最大回数 */
   maxTrials?: number;
+  /** 本計算を分ける行の帯の数（並列計算。prepareRun のみ） */
+  bands?: number;
 }
 
 /** 校正の試算に使う格子の目安のセル辺長 [m] */
@@ -99,8 +110,44 @@ export function frameIntervalFor(resolution: SimParams['resolution']): number {
   return resolution === 'fine' ? 30 : 20;
 }
 
-/** 計算を最後まで実行する（同期）。進捗・フレームは sink に逐次渡す */
-export function runEngine(input: EngineInput, sink: EngineSink, opts: EngineOptions = {}): EnginePerf {
+/** 本計算の条件（校正の結果を含む）。並列計算では各帯のワーカーへそのまま渡す */
+export interface MainPlan {
+  frameInterval: number;
+  durationSec: number;
+  lastFrame: number;
+  gaugeDiv: number;
+  gaugeInterval: number;
+  stepsPerFrame: number;
+  dt: number;
+  /** ここまでのフレームは静止（フレーム 0 と同じ）。本計算はこの次のフレームから */
+  startFrame: number;
+  tide: number;
+  landManning: number;
+  incident: IncidentWaveSpec | null;
+  gaugeCell: number;
+  /** 校正区間のセル（海岸の最大水位の評価に使う） */
+  segmentCells: Int32Array;
+  statsEveryFrames: number;
+  /** 東西端の入射条件（全体の格子の行ごと） */
+  sides: { west: SideProfile; east: SideProfile };
+  /** 初期に水のあるセル（全体の格子） */
+  initialWater: Uint8Array;
+  /** 行の帯（並列計算）。1つなら逐次計算 */
+  bands: BandSpec[];
+  calibrationMs: number;
+}
+
+export interface PreparedRun {
+  plan: MainPlan;
+  /** 全体の格子の初期状態のソルバ（逐次計算ではそのまま本計算に使う） */
+  solver: ShallowWaterSolver;
+}
+
+/**
+ * 準備: 開始情報・フレーム 0・校正・静止区間のフレーム・最大値の初期値を sink に出し、本計算の条件を返す。
+ * opts.bands（>1）を指定すると、本計算を行の帯に分ける分割も求める。
+ */
+export function prepareRun(input: EngineInput, sink: EngineSink, opts: EngineOptions = {}): PreparedRun {
   const now = opts.now ?? (() => performance.now());
   const { spec, params } = input;
   const { nx, ny } = spec;
@@ -110,9 +157,11 @@ export function runEngine(input: EngineInput, sink: EngineSink, opts: EngineOpti
   }
   const sc = params.scenario;
   const tide = Number.isFinite(params.tideTP) ? params.tideTP : 0;
-  const durationSec = Math.max(60, (Number.isFinite(params.durationMin) ? params.durationMin : 60) * 60);
   const frameInterval = frameIntervalFor(params.resolution);
-  const lastFrame = Math.ceil(durationSec / frameInterval - 1e-9);
+  const wantedSec = Math.max(60, (Number.isFinite(params.durationMin) ? params.durationMin : 60) * 60);
+  const lastFrame = Math.ceil(wantedSec / frameInterval - 1e-9);
+  // 計算終了時刻は最後のフレームの時刻（指定がフレーム間隔の倍数でなければ切り上げる）
+  const durationSec = lastFrame * frameInterval;
   const gaugeDiv = Math.max(1, Math.round(frameInterval / GAUGE_INTERVAL_TARGET));
   const gaugeInterval = frameInterval / gaugeDiv;
   const landManning = params.landManning > 0 ? params.landManning : 0.025;
@@ -132,9 +181,10 @@ export function runEngine(input: EngineInput, sink: EngineSink, opts: EngineOpti
   });
 
   // ---- フレーム 0（初期状態）----
+  const initialWater = initialWaterMask(grid, tide);
   const frame0 = new Uint16Array(n);
   for (let k = 0; k < n; k++) {
-    const d = input.kind[k] === CELL_SEA && input.z[k] < tide ? tide - input.z[k] : 0;
+    const d = initialWater[k] === 1 ? tide - input.z[k] : 0;
     frame0[k] = d > 0.005 ? Math.min(65535, Math.round(d * 100)) : 0;
   }
   const eta0 = gaugeEta0(input, gauge.k, tide);
@@ -149,6 +199,7 @@ export function runEngine(input: EngineInput, sink: EngineSink, opts: EngineOpti
   const waves = Math.max(1, Math.round(sc.waves > 0 ? sc.waves : 1));
   const arrivalSec = Math.max(0, (Number.isFinite(sc.arrivalMin) ? sc.arrivalMin : 0) * 60);
   let cal: CalibrationInfo;
+  let wet: WetMap | null = null;
   if (noWave) {
     cal = {
       targetCoastHeight: sc.coastHeight,
@@ -159,32 +210,33 @@ export function runEngine(input: EngineInput, sink: EngineSink, opts: EngineOpti
       notes: ['想定する津波の高さが潮位とほぼ同じか低いため、津波は入力していません（潮位のみの静かな海）。'],
     };
   } else {
-    cal = calibrate(input, tide, landManning, periodSec, waves, arrivalSec, opts.maxTrials ?? 3, (p, msg) =>
+    ({ info: cal, wet } = calibrate(input, tide, landManning, periodSec, waves, arrivalSec, opts.maxTrials ?? 3, (p, msg) =>
       sink.progress(0.01 + 0.19 * p, msg),
-    );
+    ));
   }
   const calibrationMs = now() - t0;
-  if (!noWave && cal.expectedCrestSec >= durationSec) {
+  if (!noWave && cal.expectedCrestSec > durationSec) {
     cal.notes.push('計算時間内に第1波は海岸に届きません。計算時間を長くしてください。');
   }
   sink.calibrated(cal);
 
-  // ---- 本計算 ----
+  // ---- 本計算の条件 ----
   const hMax = maxStillDepth(grid, tide);
   const dtCfl = stableTimeStep(spec.dx, hMax, noWave ? 0 : Math.max(2 * cal.boundaryAmplitude, 0.5));
   const stepsPerFrame = Math.ceil(frameInterval / dtCfl / gaugeDiv) * gaugeDiv;
-  const stepsPerGauge = stepsPerFrame / gaugeDiv;
   const dt = frameInterval / stepsPerFrame;
-  const incident = noWave
+  const incident: IncidentWaveSpec | null = noWave
     ? null
-    : makeIncidentWave({
-        amplitude: cal.boundaryAmplitude,
-        periodSec,
-        waves,
-        firstMotion: sc.firstMotion,
-        startSec: cal.boundaryStartSec,
-      });
-  const solver = new ShallowWaterSolver(grid, { tide, landManning, dt, incident });
+    : { amplitude: cal.boundaryAmplitude, periodSec, waves, firstMotion: sc.firstMotion, startSec: cal.boundaryStartSec };
+  const sides = { west: sideBoundaryProfile(grid, tide, false), east: sideBoundaryProfile(grid, tide, true) };
+  const solver = new ShallowWaterSolver(grid, {
+    tide,
+    landManning,
+    dt,
+    incident: incident ? makeIncidentWave(incident) : null,
+    sides,
+    initialWater,
+  });
 
   // 波が入る前の静止状態は計算しない（静水は厳密に保たれるため結果は同じ）
   let startFrame = 0;
@@ -201,23 +253,57 @@ export function runEngine(input: EngineInput, sink: EngineSink, opts: EngineOpti
     sink.frame(f, null, gt, ge);
   }
   solver.t = startFrame * frameInterval;
+  const statsEveryFrames = Math.max(1, opts.statsEveryFrames ?? 10);
+  sink.stats(snapshotStats(solver, segment.cells, tide, startFrame >= lastFrame));
 
-  const statsEvery = Math.max(1, opts.statsEveryFrames ?? 10);
-  const snapshot = (final: boolean): StatsSnapshot => {
-    const s: StatsSnapshot = {
-      maxDepth: new Float32Array(n),
-      maxEta: new Float32Array(n),
-      arrival: new Float32Array(n),
-      achievedCoastMax: coastMax(solver, segment.cells, tide),
-      final,
-    };
-    solver.copyMaxDepth(s.maxDepth);
-    solver.copyMaxEta(s.maxEta);
-    solver.copyArrival(s.arrival);
-    return s;
+  const plan: MainPlan = {
+    frameInterval,
+    durationSec,
+    lastFrame,
+    gaugeDiv,
+    gaugeInterval,
+    stepsPerFrame,
+    dt,
+    startFrame,
+    tide,
+    landManning,
+    incident,
+    gaugeCell: gauge.k,
+    segmentCells: segment.cells,
+    statsEveryFrames,
+    sides,
+    initialWater,
+    bands: [],
+    calibrationMs,
   };
-  sink.stats(snapshot(startFrame >= lastFrame));
+  const wanted = startFrame >= lastFrame ? 1 : Math.max(1, Math.floor(opts.bands ?? 1));
+  plan.bands = partitionRows(ny, rowWorkWeights(grid, tide, Math.max(sc.coastHeight, tide), wet), wanted);
+  return { plan, solver };
+}
 
+/** 全体の格子の最大値などのスナップショット */
+function snapshotStats(solver: ShallowWaterSolver, segmentCells: ArrayLike<number>, tide: number, final: boolean): StatsSnapshot {
+  const n = solver.n;
+  const s: StatsSnapshot = {
+    maxDepth: new Float32Array(n),
+    maxEta: new Float32Array(n),
+    arrival: new Float32Array(n),
+    achievedCoastMax: coastMax(solver, segmentCells, tide),
+    final,
+  };
+  solver.copyMaxDepth(s.maxDepth);
+  solver.copyMaxEta(s.maxEta);
+  solver.copyArrival(s.arrival);
+  return s;
+}
+
+/** 本計算（逐次）。prepareRun の結果を使い、フレームを sink に逐次渡す */
+export function runSerialMain(prep: PreparedRun, sink: EngineSink, opts: EngineOptions = {}): EnginePerf {
+  const now = opts.now ?? (() => performance.now());
+  const { plan, solver } = prep;
+  const { frameInterval, lastFrame, startFrame, stepsPerFrame, gaugeDiv, gaugeInterval, statsEveryFrames } = plan;
+  const stepsPerGauge = stepsPerFrame / gaugeDiv;
+  const n = solver.n;
   const tMain = now();
   const mainSpan = Math.max(1, lastFrame - startFrame);
   for (let f = startFrame + 1; f <= lastFrame; f++) {
@@ -228,33 +314,36 @@ export function runEngine(input: EngineInput, sink: EngineSink, opts: EngineOpti
       solver.step();
       if (s % stepsPerGauge === 0) {
         gt.push(tFrame0 + (s / stepsPerGauge) * gaugeInterval);
-        ge.push(solver.eta[gauge.k]);
+        ge.push(solver.eta[plan.gaugeCell]);
       }
     }
     solver.t = f * frameInterval; // 丸め誤差の蓄積を防ぐ
     const data = new Uint16Array(n);
-    if (!solver.encodeDepthCm(data)) {
-      throw new Error('計算が不安定になりました（数値が発散しました）。解像度や条件を変えて再実行してください。');
-    }
+    if (!solver.encodeDepthCm(data)) throw new Error(UNSTABLE_MESSAGE);
     sink.frame(f, data, gt, ge);
-    if (f % statsEvery === 0 || f === lastFrame) sink.stats(snapshot(f === lastFrame));
-    const minute = Math.floor((f * frameInterval) / 60);
-    sink.progress(0.2 + (0.8 * (f - startFrame)) / mainSpan, `計算中… 地震発生から ${minute}分`);
+    if (f % statsEveryFrames === 0 || f === lastFrame) sink.stats(snapshotStats(solver, plan.segmentCells, plan.tide, f === lastFrame));
+    sink.progress(0.2 + (0.8 * (f - startFrame)) / mainSpan, progressMessage(f * frameInterval, 1));
   }
   const mainMs = now() - tMain;
   return {
     steps: solver.steps,
-    dt,
+    dt: plan.dt,
     activeCells: solver.activeCells(),
     mainMs,
-    calibrationMs,
+    calibrationMs: plan.calibrationMs,
     stepsPerSec: solver.steps > 0 && mainMs > 0 ? solver.steps / (mainMs / 1000) : 0,
+    bands: 1,
   };
+}
+
+/** 計算を最後まで逐次で実行する（同期）。進捗・フレームは sink に逐次渡す */
+export function runEngine(input: EngineInput, sink: EngineSink, opts: EngineOptions = {}): EnginePerf {
+  const prep = prepareRun(input, sink, { ...opts, bands: 1 });
+  return runSerialMain(prep, sink, opts);
 }
 
 /** 校正区間の到達最大水位（各セルの最大水位の 90 パーセンタイル）[m, T.P.] */
 export function coastMax(solver: ShallowWaterSolver, cells: ArrayLike<number>, tide: number): number {
-  if (cells.length === 0) return tide;
   const v = new Float64Array(cells.length);
   for (let i = 0; i < cells.length; i++) {
     const m = solver.maxEta[cells[i]];
@@ -273,6 +362,8 @@ function gaugeEta0(input: EngineInput, k: number, tide: number): number {
 // ---------------------------------------------------------------------------
 
 interface TrialResult {
+  /** 試算で一度でも濡れたセル（試算の格子） */
+  wet: Uint8Array;
   achieved: number;
   /** 入力開始から第1波の山が海岸に届くまでの時間 [秒]（求まらなければ NaN） */
   crestDelay: number;
@@ -306,7 +397,7 @@ function calibrate(
   arrivalSec: number,
   maxTrials: number,
   progress: (p: number, msg: string) => void,
-): CalibrationInfo {
+): { info: CalibrationInfo; wet: WetMap | null } {
   const sc = input.params.scenario;
   const target = sc.coastHeight - tide;
   const notes: string[] = [];
@@ -333,7 +424,7 @@ function calibrate(
     notes.push('海岸線または沖側の開境界が見つからないため、振幅の自動調整を行っていません。');
     const A = Math.min(aMax, target);
     const start = Math.max(0, arrivalSec - crestOffset - travel);
-    return {
+    const info: CalibrationInfo = {
       targetCoastHeight: sc.coastHeight,
       boundaryAmplitude: A,
       boundaryStartSec: start,
@@ -341,6 +432,7 @@ function calibrate(
       trials: [],
       notes,
     };
+    return { info, wet: null };
   }
 
   // 試算の計算時間: 第1波の山が届くまで + 1.5 周期（第2波の山まで。ただし最大 3 時間）
@@ -378,7 +470,11 @@ function calibrate(
       break;
     }
     // 次の試算（最後の試算の後は採用値）の振幅
-    A = Math.min(aMax, Math.max(0.01, nextAmplitude(mainTrials, tide, target, A)));
+    const next = Math.min(aMax, Math.max(0.01, nextAmplitude(mainTrials, tide, target, A)));
+    // 上限で頭打ちになり、同じ振幅をもう一度試すだけになる場合は打ち切る
+    const same = Math.abs(next - A) <= 1e-6 * A;
+    A = next;
+    if (same) break;
   }
   progress(1, '沖合の波の高さを決定しました');
   if (!converged) {
@@ -400,7 +496,7 @@ function calibrate(
     );
     start = 0;
   }
-  return {
+  const info: CalibrationInfo = {
     targetCoastHeight: sc.coastHeight,
     boundaryAmplitude: A,
     boundaryStartSec: start,
@@ -408,6 +504,7 @@ function calibrate(
     trials,
     notes,
   };
+  return { info, wet: last ? { mask: last.wet, nx: main.grid.nx, ny: main.grid.ny, factor } : null };
 }
 
 /** 次に試す振幅: 1回目は比例補正、2回目以降は べき乗則 a = k·A^p を当てはめる */
@@ -454,12 +551,15 @@ function trialRun(
     if (s % sampleEvery === 0) {
       let sum = 0;
       for (let i = 0; i < seg.length; i++) sum += solver.eta[seg[i]];
+      if (!Number.isFinite(sum)) throw new Error(UNSTABLE_MESSAGE);
       times.push(solver.t);
       means.push(sum / seg.length - tide);
     }
     if (s % reportEvery === 0) progress(s / steps);
   }
-  return { achieved: coastMax(solver, seg, tide), crestDelay: firstCrestTime(times, means) };
+  const wet = new Uint8Array(solver.n);
+  for (let k = 0; k < solver.n; k++) wet[k] = solver.maxEta[k] !== -Infinity ? 1 : 0;
+  return { wet, achieved: coastMax(solver, seg, tide), crestDelay: firstCrestTime(times, means) };
 }
 
 /** 区間平均の水位の時系列から、第1波の山の時刻を求める（最大上昇量の半分を初めて超えた後の極大） */

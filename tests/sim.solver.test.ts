@@ -61,9 +61,32 @@ describe('静水の保存（well-balanced）', () => {
     for (let k = 0; k < eta0.length; k++) if (g.kind[k] === CELL_LAND) expect(solver.depth(k)).toBe(0);
   });
 
-  it('潮位より低い陸が海に接していれば静止ではないと判定する', () => {
-    const { solver } = solverFor({ nx: 10, ny: 10, dx: 10, z: (i) => (i < 5 ? -3 : -0.2), kind: (i) => (i < 5 ? CELL_SEA : CELL_LAND) });
-    expect(solver.isAtRest()).toBe(false);
+  it('潮位より低く海とつながる陸は初期に水域（静止）、海とつながらない低地は乾いたまま', () => {
+    // 西半分が海、東半分が T.P.−0.2 m の低い陸。その中に堤（+2 m）で囲まれた低地（−0.5 m）
+    const { g, solver } = solverFor({
+      nx: 12,
+      ny: 12,
+      dx: 10,
+      z: (i, j) => {
+        if (i < 5) return -3;
+        if (i >= 7 && i <= 10 && j >= 3 && j <= 8) return i === 7 || i === 10 || j === 3 || j === 8 ? 2 : -0.5;
+        return -0.2;
+      },
+      kind: (i) => (i < 5 ? CELL_SEA : CELL_LAND),
+    });
+    expect(solver.isAtRest()).toBe(true);
+    const k = (i: number, j: number) => j * 12 + i;
+    expect(solver.depth(k(6, 1))).toBeCloseTo(0.2, 6); // 海とつながる低い陸: 潮位まで水
+    expect(solver.initiallyDry[k(6, 1)]).toBe(0);
+    expect(solver.depth(k(8, 5))).toBe(0); // 囲まれた低地: 乾燥
+    expect(solver.initiallyDry[k(8, 5)]).toBe(1);
+    for (let s = 0; s < 200; s++) solver.step();
+    expect(maxAbs(solver.M)).toBeLessThan(1e-9);
+    expect(solver.depth(k(8, 5))).toBe(0);
+    const arr = new Float32Array(144);
+    solver.copyArrival(arr);
+    expect(arr.every((v) => v === Infinity)).toBe(true); // 潮位による冠水は「浸水」に数えない
+    expect(g.kind[k(6, 1)]).toBe(CELL_LAND);
   });
 });
 
@@ -223,5 +246,75 @@ describe('遡上（斜面の海岸）', () => {
       expect(Number.isFinite(solver.eta[k])).toBe(true);
       expect(solver.eta[k]).toBeGreaterThanOrEqual(solver.z[k]);
     }
+  });
+});
+
+describe('質量収支（開境界あり）と乾燥セルを越える流れ', () => {
+  /** 開境界の面を通って外へ出る流量の合計 [m²/s]（次のステップの連続式で使われる値） */
+  function boundaryOutflow(s: ShallowWaterSolver): number {
+    const { nx, ny } = s;
+    let q = 0;
+    for (let i = 0; i < nx; i++) q += s.N[ny * nx + i] - s.N[i];
+    for (let j = 0; j < ny; j++) q += s.M[j * (nx + 1) + nx] - s.M[j * (nx + 1)];
+    return q;
+  }
+
+  it('総水量の変化 = 開境界を通った流量（遡上・引き・流速上限を含めて、相対誤差 < 1e-9）', () => {
+    const nx = 40;
+    const ny = 90;
+    const dx = 15;
+    // 南ほど深い斜面の海、北は陸（途中に溝や段差）。南・東・西が開境界
+    const zf = (i: number, j: number) => -6 + (ny - 1 - j) * 0.12 + (j < 40 ? 0.8 * Math.sin(i * 0.9) : 0) + (i === 20 && j < 45 ? -1.5 : 0);
+    const A = 2.5;
+    const incident = makeIncidentWave({ amplitude: A, periodSec: 120, waves: 2, firstMotion: 'rise', startSec: 0 });
+    const { solver } = solverFor(
+      { nx, ny, dx, z: zf, kind: (_i, _j, z) => (z < 0 ? CELL_SEA : CELL_LAND) },
+      { open: { north: false, south: true, east: true, west: true }, incident, waveHeight: 2 * A },
+    );
+    const v0 = solver.totalVolume();
+    let err = 0;
+    let exchanged = 0;
+    let wetLand = 0;
+    for (let s = 0; s < 1500; s++) {
+      const out = boundaryOutflow(solver) * solver.dt * solver.dx;
+      const before = solver.totalVolume();
+      solver.step();
+      const after = solver.totalVolume();
+      err += after - (before - out);
+      exchanged += Math.abs(out);
+      if (s % 100 === 0) for (let k = 0; k < nx * ny; k++) if (solver.isLand[k] && solver.depth(k) > 0.05) wetLand++;
+    }
+    expect(exchanged).toBeGreaterThan(0.1 * v0); // 境界を通して大きく出入りした
+    expect(wetLand).toBeGreaterThan(0); // 陸に遡上した
+    expect(Math.abs(err) / v0).toBeLessThan(1e-9);
+  });
+
+  it('水位が堤の高さに届かなければ、堤の向こうの低地（乾燥）には一滴も入らない', () => {
+    const run = (A: number) => {
+      const nx = 12;
+      const ny = 60;
+      const dx = 20;
+      // 南から: 海（水深 8 m → 汀線）、砂浜、堤（+4 m、j=20..22）、その北に海面より低い乾いた低地（−1 m）
+      const zf = (_i: number, j: number) => (j >= 20 && j <= 22 ? 4 : j < 20 ? -1 : -8 + ((ny - 1 - j) * 8.5) / (ny - 24));
+      const kind = (_i: number, j: number) => (j <= 30 ? CELL_LAND : CELL_SEA);
+      const incident = makeIncidentWave({ amplitude: A, periodSec: 150, waves: 1, firstMotion: 'rise', startSec: 0 });
+      const { solver } = solverFor({ nx, ny, dx, z: zf, kind }, { open: { north: false, south: true, east: false, west: false }, incident, waveHeight: 2 * A });
+      let maxAtDike = -Infinity;
+      let pocketWater = 0;
+      while (solver.t < 900) {
+        solver.step();
+        for (let i = 0; i < nx; i++) {
+          maxAtDike = Math.max(maxAtDike, solver.eta[23 * nx + i]);
+          for (let j = 0; j < 20; j++) pocketWater = Math.max(pocketWater, solver.depth(j * nx + i));
+        }
+      }
+      return { maxAtDike, pocketWater };
+    };
+    const low = run(1);
+    expect(low.maxAtDike).toBeLessThan(4); // 堤の前の水位は堤の高さに届かない
+    expect(low.pocketWater).toBe(0);
+    const high = run(3); // 越流する大きさの波では低地に水が入る（堤が単なる壁になっていないことの確認）
+    expect(high.maxAtDike).toBeGreaterThan(4);
+    expect(high.pocketWater).toBeGreaterThan(0.05);
   });
 });

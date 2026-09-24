@@ -83,6 +83,79 @@ export interface OpenEdges {
   west: boolean;
 }
 
+/**
+ * 東西端の開境界に与える入射波の条件（行ごと）。
+ * delay: 南端から各行のセル中心までの長波の伝播時間 [秒]、a: 入射波に掛ける係数（Green 則の増幅率。0 は入射なし）。
+ */
+export interface SideProfile {
+  delay: Float64Array;
+  a: Float64Array;
+}
+
+/**
+ * 東西端の列に沿って、南端から北へ伝播時間と Green 則の増幅率 (h_南端 / h)^(1/4) を積算する。
+ * 途中に陸（または浅すぎる海）があれば、それより北は入射なし（純粋な放射条件）とする。
+ */
+export function sideBoundaryProfile(grid: SolverGrid, tide: number, isEast: boolean, southOpen = true): SideProfile {
+  const { nx, ny, dx } = grid;
+  const ic = isEast ? nx - 1 : 0;
+  const delay = new Float64Array(ny);
+  const a = new Float64Array(ny);
+  const stillDepth = (k: number) => (grid.kind[k] === CELL_SEA ? tide - Number(grid.z[k]) : -1);
+  let tau = 0;
+  let cPrev = 0;
+  let connected = southOpen;
+  const hSouth = Math.max(0.5, stillDepth((ny - 1) * nx + ic));
+  for (let j = ny - 1; j >= 0; j--) {
+    const h = stillDepth(j * nx + ic);
+    if (h < OPEN_BOUNDARY_MIN_DEPTH) {
+      connected = false;
+      continue;
+    }
+    const c = Math.sqrt(GRAVITY * Math.max(0.5, h));
+    tau += j === ny - 1 ? (0.5 * dx) / c : (0.5 * dx) / cPrev + (0.5 * dx) / c;
+    cPrev = c;
+    delay[j] = tau;
+    a[j] = connected ? Math.min(2.5, Math.max(0.5, Math.pow(hSouth / Math.max(0.5, h), 0.25))) : 0;
+  }
+  return { delay, a };
+}
+
+/**
+ * 初期状態（t = 0）で水のあるセル。潮位より低い海セルに加えて、潮位より低い陸のうち
+ * 潮位より低いセルだけを通って海とつながっているもの（干潟・岩礁・河口の砂州などの潮間帯）も
+ * その潮位では水面下にあるので水域として扱う。海とつながらない低地（堤防の内側など）は乾いたまま。
+ * 並列計算では全体の格子で求めたものを各帯に渡す（つながりが帯の外を通る場合があるため）。
+ */
+export function initialWaterMask(grid: Pick<SolverGrid, 'nx' | 'ny' | 'z' | 'kind'>, tide: number): Uint8Array {
+  const { nx, ny } = grid;
+  const n = nx * ny;
+  const wet = new Uint8Array(n);
+  const stack: number[] = [];
+  for (let k = 0; k < n; k++) {
+    if (grid.kind[k] === CELL_SEA && grid.z[k] < tide) {
+      wet[k] = 1;
+      stack.push(k);
+    }
+  }
+  const visit = (kk: number) => {
+    if (wet[kk] === 0 && grid.kind[kk] !== CELL_SEA && grid.z[kk] < tide) {
+      wet[kk] = 1;
+      stack.push(kk);
+    }
+  };
+  while (stack.length > 0) {
+    const k = stack.pop()!;
+    const j = (k / nx) | 0;
+    const i = k - j * nx;
+    if (i > 0) visit(k - 1);
+    if (i < nx - 1) visit(k + 1);
+    if (j > 0) visit(k - nx);
+    if (j < ny - 1) visit(k + nx);
+  }
+  return wet;
+}
+
 export interface SolverOptions {
   /** 潮位 [m, T.P.]（初期の静水面） */
   tide: number;
@@ -97,6 +170,13 @@ export interface SolverOptions {
   /** 開境界にする辺（既定: すべて。海セルに接する面だけが開境界になる） */
   open?: Partial<OpenEdges>;
   velocityCap?: number;
+  /**
+   * 東西端の入射条件（この格子の行ごと）。省略時はこの格子から sideBoundaryProfile で求める。
+   * 領域を行の帯に分けて並列計算するときは、全体の格子で求めた値の該当行を渡す。
+   */
+  sides?: { west: SideProfile; east: SideProfile };
+  /** 初期に水のあるセル（省略時はこの格子から initialWaterMask で求める） */
+  initialWater?: Uint8Array;
 }
 
 /** CFL 条件から安定な時間刻みを求める（クーラン数 COURANT） */
@@ -163,8 +243,6 @@ export class ShallowWaterSolver {
   t: number;
   steps = 0;
   incident: WaveFn | null;
-  /** 最大値・到達時刻を記録する間隔 [ステップ]（1 なら毎ステップ） */
-  statsEvery = 4;
 
   /** 地盤高 [m, T.P.] */
   readonly z: Float64Array;
@@ -172,13 +250,15 @@ export class ShallowWaterSolver {
   readonly eta: Float64Array;
   /** セルのマニング粗度の2乗 */
   readonly nsq: Float64Array;
-  /** 陸セル（= 初期に乾燥しているセル）なら 1 */
+  /** 陸セル（種別が海以外）なら 1 */
   readonly isLand: Uint8Array;
+  /** 初期（t = 0）に乾燥しているセルなら 1（最大浸水深・到達時刻を記録する対象） */
+  readonly initiallyDry: Uint8Array;
   /** 最大水位（一度も濡れていないセルは −∞） */
   readonly maxEta: Float32Array;
-  /** 最大全水深 [m]（全セル。陸以外は出力時に 0 にする） */
+  /** 最大全水深 [m]（全セル。初期に水のあるセルは出力時に 0 にする） */
   readonly maxDepth: Float32Array;
-  /** 浸水開始時刻 [秒]（陸: 未浸水 +∞、陸以外: −∞） */
+  /** 浸水開始時刻 [秒]（初期に乾燥したセル: 未浸水 +∞、それ以外: −∞） */
   readonly arrival: Float32Array;
 
   private m0: Float64Array;
@@ -245,6 +325,9 @@ export class ShallowWaterSolver {
     this.eta = new Float64Array(n);
     this.nsq = new Float64Array(n);
     this.isLand = new Uint8Array(n);
+    this.initiallyDry = new Uint8Array(n);
+    const water = opts.initialWater ?? initialWaterMask(grid, tide);
+    if (water.length !== n) throw new Error('初期の水域の大きさが格子と一致しません');
     this.maxEta = new Float32Array(n);
     this.maxDepth = new Float32Array(n);
     this.arrival = new Float32Array(n);
@@ -263,12 +346,15 @@ export class ShallowWaterSolver {
       this.z[k] = zk;
       const land = grid.kind[k] !== CELL_SEA;
       this.isLand[k] = land ? 1 : 0;
-      // 初期状態: 海は潮位で静止、陸はすべて乾燥（潮位より低くても水を置かない）
-      const wet = !land && zk < tide;
+      // 初期状態: 水域（海と、海につながる潮位以下の土地）は潮位で静止、それ以外は乾燥
+      // （潮位より高い海セル＝上流の河床など も乾燥として扱い、浸水の記録の対象にする）
+      const wet = water[k] === 1 && zk < tide;
+      const dry0 = !wet;
+      this.initiallyDry[k] = dry0 ? 1 : 0;
       this.eta[k] = wet ? tide : zk;
       const wetDeep = wet && tide - zk > DRY_DEPTH;
       this.maxEta[k] = wetDeep ? tide : -Infinity;
-      this.arrival[k] = land ? Infinity : -Infinity;
+      this.arrival[k] = dry0 ? Infinity : -Infinity;
       if (land) this.nsq[k] = landN2;
       else {
         const m = Number(grid.manning[k]);
@@ -313,36 +399,26 @@ export class ShallowWaterSolver {
         if (h >= OPEN_BOUNDARY_MIN_DEPTH) faces.push({ face: i, cell: i, isM: false, sign: -1, h, a: 0, delay: 0 });
       }
     }
-    const side = (ic: number, isEast: boolean) => {
-      // 南端から北へ、この列に沿った伝播時間と Green 則の増幅率を積算する
-      let tau = 0;
-      let cPrev = 0;
-      let connected = open.south;
-      const hSouth = Math.max(0.5, stillDepth((ny - 1) * nx + ic));
+    const side = (isEast: boolean) => {
+      const prof = opts.sides ? (isEast ? opts.sides.east : opts.sides.west) : sideBoundaryProfile(grid, tide, isEast, open.south);
+      const ic = isEast ? nx - 1 : 0;
       for (let j = ny - 1; j >= 0; j--) {
         const k = j * nx + ic;
         const h = stillDepth(k);
-        if (h < OPEN_BOUNDARY_MIN_DEPTH) {
-          connected = false;
-          continue;
-        }
-        const c = Math.sqrt(GRAVITY * Math.max(0.5, h));
-        tau += j === ny - 1 ? (0.5 * dx) / c : (0.5 * dx) / cPrev + (0.5 * dx) / c;
-        cPrev = c;
-        const green = Math.min(2.5, Math.max(0.5, Math.pow(hSouth / Math.max(0.5, h), 0.25)));
+        if (h < OPEN_BOUNDARY_MIN_DEPTH) continue;
         faces.push({
           face: j * (nx + 1) + (isEast ? nx : 0),
           cell: k,
           isM: true,
           sign: isEast ? 1 : -1,
           h,
-          a: connected ? green : 0,
-          delay: tau,
+          a: prof.a[j],
+          delay: prof.delay[j],
         });
       }
     };
-    if (open.west) side(0, false);
-    if (open.east) side(nx - 1, true);
+    if (open.west) side(false);
+    if (open.east) side(true);
     const bc = faces.length;
     this.bCount = bc;
     this.bFace = new Int32Array(bc);
@@ -422,7 +498,7 @@ export class ShallowWaterSolver {
   /** 1ステップ進める */
   step(): void {
     const tNew = this.t + this.dt;
-    this.continuity(tNew, this.steps % this.statsEvery === 0);
+    this.continuity(tNew);
     if (this.dirtyHi >= 0) this.rebuildRuns();
     this.applyBoundaries(tNew);
     this.momentumAndLimit();
@@ -483,8 +559,8 @@ export class ShallowWaterSolver {
 
   // ---- 差分計算 ----
 
-  /** 連続式（水位の更新）と最大値・到達時刻の記録 */
-  private continuity(tNew: number, track: boolean): void {
+  /** 連続式（水位の更新）と最大値・到達時刻の記録（毎ステップ。記録の手間は濡れたセルだけなのでわずか） */
+  private continuity(tNew: number): void {
     const { nx, ny, nb, eta, z, m0, n0, coreRuns, coreCount, wetBlock, maxEta, maxDepth, arrival } = this;
     const r = this.dt / this.dx;
     const stride = this.maxRuns * 2;
@@ -509,11 +585,9 @@ export class ShallowWaterSolver {
           const d = e - zk;
           if (d > DRY_DEPTH) {
             if (wetBlock[rowB + (i >> BLOCK_SHIFT)] === 0) this.activate(j, i);
-            if (track) {
-              if (e > maxEta[k]) maxEta[k] = e;
-              if (d > maxDepth[k]) maxDepth[k] = d;
-              if (d >= ARRIVAL_DEPTH && arrival[k] > tNew) arrival[k] = tNew;
-            }
+            if (e > maxEta[k]) maxEta[k] = e;
+            if (d > maxDepth[k]) maxDepth[k] = d;
+            if (d >= ARRIVAL_DEPTH && arrival[k] > tNew) arrival[k] = tNew;
           }
         }
       }
@@ -831,48 +905,97 @@ export class ShallowWaterSolver {
     }
   }
 
+  // ---- 行の帯に分けた並列計算のための入出力 ----
+
+  /** 行 r0..r1−1 の状態（水位・M・その行の北の面の N）を1本の配列に詰めるのに必要な長さ */
+  haloLength(rows: number): number {
+    return rows * (3 * this.nx + 1);
+  }
+
+  /** 行 r0..r0+rows−1 の状態を out に書き出す（隣の帯へ送る） */
+  exportRows(r0: number, rows: number, out: Float64Array): void {
+    const { nx, eta, m0, n0 } = this;
+    let o = 0;
+    out.set(eta.subarray(r0 * nx, (r0 + rows) * nx), o);
+    o += rows * nx;
+    out.set(m0.subarray(r0 * (nx + 1), (r0 + rows) * (nx + 1)), o);
+    o += rows * (nx + 1);
+    out.set(n0.subarray(r0 * nx, (r0 + rows) * nx), o);
+  }
+
   /**
-   * 全水深を cm 単位の Uint16 に書き出す（フレーム）。
+   * 隣の帯から受け取った行 r0..r0+rows−1 の状態で上書きする（のりしろの行）。
+   * 濡れたセルの記録も更新し、計算範囲を作り直す。
+   */
+  importRows(r0: number, rows: number, data: Float64Array): void {
+    const { nx, nb, eta, z, m0, n0, wetBlock } = this;
+    let o = 0;
+    eta.set(data.subarray(o, o + rows * nx), r0 * nx);
+    o += rows * nx;
+    m0.set(data.subarray(o, o + rows * (nx + 1)), r0 * (nx + 1));
+    o += rows * (nx + 1);
+    n0.set(data.subarray(o, o + rows * nx), r0 * nx);
+    for (let j = r0; j < r0 + rows; j++) {
+      for (let i = 0; i < nx; i++) {
+        const k = j * nx + i;
+        if (eta[k] - z[k] > DRY_DEPTH && wetBlock[j * nb + (i >> BLOCK_SHIFT)] === 0) this.activate(j, i);
+      }
+    }
+    if (this.dirtyHi >= 0) this.rebuildRuns();
+  }
+
+  /**
+   * 行 r0..r1−1 の全水深を cm 単位の Uint16 に書き出す（フレーム）。
    * @returns 数値が発散（NaN/∞）していたら false
    */
-  encodeDepthCm(out: Uint16Array): boolean {
+  encodeRowsCm(r0: number, r1: number, out: Uint16Array): boolean {
     const { eta, z } = this;
+    const k0 = r0 * this.nx;
+    const k1 = r1 * this.nx;
     let ok = true;
-    for (let k = 0; k < this.n; k++) {
+    for (let k = k0; k < k1; k++) {
       const d = eta[k] - z[k];
       if (d > 0.005) {
         const v = Math.round(d * 100);
-        out[k] = v < 65535 ? v : 65535;
+        out[k - k0] = v < 65535 ? v : 65535;
         if (v !== v || v === Infinity) ok = false;
       } else {
-        out[k] = 0;
+        out[k - k0] = 0;
         if (!(d === d)) ok = false;
       }
     }
     return ok;
   }
 
-  /** 最大浸水深（初期に乾燥していた陸セルのみ。それ以外は 0） */
-  copyMaxDepth(out: Float32Array): void {
-    const { isLand, maxDepth } = this;
-    for (let k = 0; k < this.n; k++) out[k] = isLand[k] ? maxDepth[k] : 0;
+  /** 全水深を cm 単位の Uint16 に書き出す（フレーム）。数値が発散していたら false */
+  encodeDepthCm(out: Uint16Array): boolean {
+    return this.encodeRowsCm(0, this.ny, out);
   }
 
-  /** 最大水位（一度も濡れていないセルは NaN） */
-  copyMaxEta(out: Float32Array): void {
+  /** 最大浸水深（初期に乾燥していたセルのみ。それ以外は 0）。行 r0..r1−1 を out の先頭から */
+  copyMaxDepth(out: Float32Array, r0 = 0, r1 = this.ny): void {
+    const { initiallyDry, maxDepth } = this;
+    const k0 = r0 * this.nx;
+    for (let k = k0; k < r1 * this.nx; k++) out[k - k0] = initiallyDry[k] ? maxDepth[k] : 0;
+  }
+
+  /** 最大水位（一度も濡れていないセルは NaN）。行 r0..r1−1 を out の先頭から */
+  copyMaxEta(out: Float32Array, r0 = 0, r1 = this.ny): void {
     const { maxEta } = this;
-    for (let k = 0; k < this.n; k++) {
+    const k0 = r0 * this.nx;
+    for (let k = k0; k < r1 * this.nx; k++) {
       const v = maxEta[k];
-      out[k] = v === -Infinity ? NaN : v;
+      out[k - k0] = v === -Infinity ? NaN : v;
     }
   }
 
-  /** 浸水開始時刻（陸セルのみ。未浸水・陸以外は +∞） */
-  copyArrival(out: Float32Array): void {
+  /** 浸水開始時刻（初期に乾燥していたセルのみ。未浸水・それ以外は +∞）。行 r0..r1−1 を out の先頭から */
+  copyArrival(out: Float32Array, r0 = 0, r1 = this.ny): void {
     const { arrival } = this;
-    for (let k = 0; k < this.n; k++) {
+    const k0 = r0 * this.nx;
+    for (let k = k0; k < r1 * this.nx; k++) {
       const v = arrival[k];
-      out[k] = v === -Infinity ? Infinity : v;
+      out[k - k0] = v === -Infinity ? Infinity : v;
     }
   }
 }

@@ -159,17 +159,7 @@ export function travelTimeToSegment(g: GridLike, tide: number, cells: ArrayLike<
   return times[Math.floor(times.length / 2)];
 }
 
-/** 有限値の p パーセンタイル（0〜100）。値がなければ NaN */
-export function percentile(values: ArrayLike<number>, p: number): number {
-  const v: number[] = [];
-  for (let i = 0; i < values.length; i++) if (Number.isFinite(values[i])) v.push(values[i]);
-  if (v.length === 0) return NaN;
-  v.sort((a, b) => a - b);
-  const x = (Math.min(100, Math.max(0, p)) / 100) * (v.length - 1);
-  const i0 = Math.floor(x);
-  const i1 = Math.min(v.length - 1, i0 + 1);
-  return v[i0] + (v[i1] - v[i0]) * (x - i0);
-}
+export { percentile } from './common';
 
 export interface DecimatedGrid {
   spec: GridSpec;

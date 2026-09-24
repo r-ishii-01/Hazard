@@ -95,6 +95,21 @@ export class SimRunOutput implements SimOutput {
     this.revision++;
   }
 
+  /** 並列計算の帯ごとの最大値など（行 rowStart からの担当行）を書き込む */
+  setStatsRows(rowStart: number, maxDepth: Float32Array, maxEta: Float32Array, arrival: Float32Array): void {
+    const k0 = rowStart * this.spec.nx;
+    if (k0 < 0 || k0 + maxDepth.length > this.n) return;
+    this.maxDepth.set(maxDepth, k0);
+    this.maxEta.set(maxEta, k0);
+    this.arrival.set(arrival, k0);
+    this.revision++;
+  }
+
+  setAchieved(achievedCoastMax: number): void {
+    if (Number.isFinite(achievedCoastMax)) this.achieved = achievedCoastMax;
+    this.revision++;
+  }
+
   setCalibration(info: CalibrationInfo): void {
     this.calibrationDetail = info;
     this.calibration = { targetCoastHeight: info.targetCoastHeight, boundaryAmplitude: info.boundaryAmplitude };

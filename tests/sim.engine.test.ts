@@ -156,16 +156,20 @@ describe('エンジン: 校正と出力', () => {
     expect(r.perf.steps).toBe(0);
   });
 
-  it('潮位より低い陸が海に接している場合は t=0 から計算する（静止を仮定しない）', () => {
-    // 合成地形の砂浜の汀線は T.P.+0.3 m。潮位 +0.5 m では満潮で砂浜の下部が冠水する
+  it('満潮で水面下になる砂浜は初期状態から水域として扱い、浸水とは数えない', () => {
+    // 合成地形の砂浜の汀線は T.P.+0.3 m。潮位 +0.5 m では砂浜の下部が水面下になる
     const sc = scenario({ coastHeight: 0.5 });
     const r = run(grid, params(sc, { tideTP: 0.5, durationMin: 5 }));
     expect(r.cal.boundaryAmplitude).toBe(0);
-    expect(r.frames.every((f) => f !== null)).toBe(true);
-    expect(r.perf.steps).toBeGreaterThan(0);
-    let wet = 0;
-    for (let k = 0; k < r.stats.maxDepth.length; k++) if (r.stats.maxDepth[k] > 0.01) wet++;
-    expect(wet).toBeGreaterThan(0);
+    // 静止状態なので計算は不要（フレーム 0 と同じ）
+    expect(r.perf.steps).toBe(0);
+    for (let f = 1; f < r.frames.length; f++) expect(r.frames[f]).toBeNull();
+    // フレーム 0 で、潮位より低い砂浜（陸セル）に水がある
+    let wetBeach = 0;
+    for (let k = 0; k < grid.z.length; k++) if (grid.kind[k] !== 1 && grid.z[k] < 0.5 && r.frames[0]![k] > 0) wetBeach++;
+    expect(wetBeach).toBeGreaterThan(0);
+    expect(r.stats.maxDepth.every((v) => v === 0)).toBe(true);
+    expect(r.stats.arrival.every((v) => v === Infinity)).toBe(true);
   });
 
   it('到達時間が伝播時間より短いときは開始を 0 にして注記する', () => {
