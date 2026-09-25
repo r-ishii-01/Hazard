@@ -9,6 +9,8 @@
   地名・住所の検索や現在地からも置けます。人物の評価は公式の津波浸水想定とも照らし合わせます（計算だけで「安全」とは示しません）。
 - 神奈川県の公式の津波浸水想定（ハザードマップ）を重ねて比べられます。
 
+**公開サイト:** https://hazard-chi.vercel.app/ （Vercel）
+
 > [!IMPORTANT]
 > **このサイトは学習用の簡易モデルです。国・県・市の公的な予測や想定ではありません。**
 > 計算は地形・海底地形・建物などを簡略化しており、実際の津波の高さ・到達時間・浸水範囲とは異なります。
@@ -274,6 +276,17 @@ NODE_USE_ENV_PROXY=1 node scripts/prefetch-dem.mjs   # HTTPS プロキシの内�
 ---
 
 ## 公開（デプロイ）
+
+### Vercel（現在の公開先）
+
+Vercel のプロジェクト `hazard`（チーム r-ishii's projects）に GitHub リポジトリ `r-ishii-01/Hazard` を連携して公開しています。
+
+- 公開 URL: https://hazard-chi.vercel.app/ （誰でも閲覧できます）
+- 本番ブランチ（リポジトリの既定ブランチ）へプッシュすると、Vercel が自動でビルド（`npm run build`、フレームワーク: Vite、出力: `dist/`）して本番を更新します。
+- それ以外のブランチのプッシュはプレビューとしてデプロイされます。プレビューの URL（`*-r-ishiis-projects.vercel.app`）はチームの既定の保護設定により Vercel へのログインが必要です。
+- 設定の変更（独自ドメイン・保護設定など）は Vercel のダッシュボードのプロジェクト `hazard` から行えます。
+
+### そのほかの静的ホスティング
 
 `npm run build` で `dist/` に静的なファイル一式ができます。サーバー側の処理は不要なので、GitHub Pages・Netlify・Cloudflare Pages・
 任意の Web サーバーなどの **静的ホスティング** にそのまま置けます。
