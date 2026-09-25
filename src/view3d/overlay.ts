@@ -20,7 +20,7 @@ const CSS = `
 .v3d-compass{width:32px;height:32px;padding:0;justify-content:center;border-radius:50%}
 .v3d-compass svg{transition:none}
 .v3d-compass-reset{display:none}
-@media (pointer:coarse){.v3d-btn{min-height:40px}.v3d-compass{width:40px;height:40px}.v3d-attrib-btn{min-height:32px;min-width:48px}}
+@media (pointer:coarse){.v3d-btn{min-height:40px}.v3d-compass{width:40px;height:40px}.v3d-attrib-btn{min-height:40px;min-width:48px}.v3d-card-close{width:40px;height:40px;top:0;right:0}.v3d-card h4{margin-right:36px}}
 .v3d-root.v3d-narrow .v3d-tools{top:8px;right:8px}
 .v3d-root.v3d-narrow .v3d-reset{display:none}
 .v3d-root.v3d-narrow .v3d-compass{width:40px;height:40px;position:relative}
@@ -30,11 +30,28 @@ const CSS = `
 .v3d-attrib a{color:inherit;text-decoration:underline;text-decoration-color:rgba(51,65,85,.4)}
 .v3d-attrib-btn{display:none;font:600 11px/1 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#1e293b;background:rgba(255,255,255,.88);border:1px solid rgba(15,23,42,.18);border-radius:999px;padding:5px 9px;cursor:pointer}
 .v3d-attrib-btn:focus-visible{outline:2px solid #0284c7;outline-offset:1px}
-.v3d-root.v3d-narrow .v3d-attrib-btn{display:block;position:absolute;right:6px;bottom:3px;z-index:3;min-height:30px;min-width:48px}
-.v3d-root.v3d-narrow .v3d-attrib{bottom:40px;right:6px;border-radius:6px;max-width:calc(100% - 12px)}
+.v3d-root.v3d-narrow .v3d-attrib-btn{display:block;position:absolute;right:4px;bottom:0;z-index:3;min-height:40px;min-width:48px;padding:5px 12px}
+.v3d-root.v3d-narrow .v3d-attrib{bottom:46px;right:6px;border-radius:6px;max-width:calc(100% - 12px)}
 .v3d-root.v3d-narrow .v3d-attrib[data-open="0"]{display:none}
+.v3d-root.v3d-narrow .v3d-card-close{width:40px;height:40px;top:0;right:0}
+.v3d-root.v3d-narrow .v3d-card h4{margin-right:36px}
 .v3d-msg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2;font:600 13px/1.5 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#0f172a;background:rgba(255,255,255,.9);border-radius:10px;padding:10px 16px;box-shadow:0 2px 10px rgba(15,23,42,.2);pointer-events:none;text-align:center;max-width:80%}
 .v3d-tip{position:absolute;z-index:3;pointer-events:none;font:500 12px/1.45 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#f8fafc;background:rgba(15,23,42,.9);border-radius:6px;padding:5px 8px;white-space:pre-line;max-width:280px;transform:translate(12px,12px)}
+.v3d-tip-note{display:block;margin-top:4px;padding-top:4px;border-top:1px solid rgba(248,250,252,.25);font-size:10.5px;line-height:1.45;font-weight:400;color:#cbd5e1;white-space:normal}
+.v3d-tip-note[hidden]{display:none}
+.v3d-card{position:absolute;z-index:4;box-sizing:border-box;width:max-content;max-width:min(300px,calc(100% - 16px));font:500 12px/1.5 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#0f172a;background:#fff;border-radius:10px;padding:9px 12px 10px;box-shadow:0 4px 16px rgba(15,23,42,.32);user-select:text;-webkit-user-select:text;touch-action:auto}
+.v3d-card[hidden]{display:none}
+.v3d-card-close{position:absolute;top:2px;right:2px;width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:50%;background:transparent;color:#334155;font:700 17px/1 system-ui,sans-serif;cursor:pointer}
+.v3d-card-close:hover{background:#f1f5f9}
+.v3d-card-close:focus-visible{outline:2px solid #0284c7;outline-offset:1px}
+.v3d-card h4{margin:0 30px 2px 0;font-size:13.5px;line-height:1.35}
+.v3d-card p{margin:2px 0 0}
+.v3d-card-kind{display:inline-block;font-size:11px;padding:0 6px;border-radius:999px;color:#fff;margin-bottom:3px}
+.v3d-card-src{color:#64748b;font-size:10.5px;margin-top:4px}
+.v3d-card .v3d-shelter-note{margin-top:6px;padding-top:5px;border-top:1px solid #e2e8f0;color:#475569;font-size:10.5px;line-height:1.5;max-height:min(36vh,200px);overflow-y:auto;overscroll-behavior:contain}
+.v3d-card .v3d-shelter-note p{margin:0 0 3px}
+.v3d-card a{color:#0369a1;text-decoration:underline}
+.v3d-card a:focus-visible{outline:2px solid #0284c7;outline-offset:1px}
 .v3d-root[data-placing="1"] canvas{cursor:crosshair}
 .v3d-toast{position:absolute;left:50%;top:56px;transform:translateX(-50%);z-index:3;font:600 12.5px/1.4 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;color:#fff;background:rgba(15,23,42,.88);border-radius:8px;padding:7px 12px;pointer-events:none;transition:opacity .25s;opacity:0}
 .v3d-toast[data-show="1"]{opacity:1}
@@ -52,6 +69,13 @@ export class Overlay {
   private readonly attrib: HTMLDivElement;
   private readonly msg: HTMLDivElement;
   private readonly tip: HTMLDivElement;
+  private readonly tipText: HTMLSpanElement;
+  private readonly tipNote: HTMLSpanElement;
+  /** 地図の上の説明の札（避難場所をクリック・タップしたとき。リンクを押せる） */
+  private readonly card: HTMLDivElement;
+  private readonly cardBody: HTMLDivElement;
+  private cardAnchor: { x: number; y: number } | null = null;
+  private onCardClose: (() => void) | null = null;
   private readonly toastEl: HTMLDivElement;
   private toastTimer = 0;
   private readonly attribBtn: HTMLButtonElement;
@@ -103,6 +127,34 @@ export class Overlay {
     this.tip = document.createElement('div');
     this.tip.className = 'v3d-tip';
     this.tip.hidden = true;
+    this.tipText = document.createElement('span');
+    this.tipNote = document.createElement('span');
+    this.tipNote.className = 'v3d-tip-note';
+    this.tipNote.hidden = true;
+    this.tip.append(this.tipText, this.tipNote);
+    this.card = document.createElement('div');
+    this.card.className = 'v3d-card';
+    this.card.setAttribute('role', 'dialog');
+    this.card.hidden = true;
+    this.cardBody = document.createElement('div');
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'v3d-card-close';
+    close.setAttribute('aria-label', '閉じる');
+    close.title = '閉じる';
+    close.textContent = '×';
+    close.addEventListener('click', () => this.showCard(null));
+    this.card.append(this.cardBody, close);
+    // 札の上の操作（リンク・スクロール・閉じる）を 3D の操作（回転・クリックでの選択）に渡さない
+    for (const type of ['pointerdown', 'pointerup', 'wheel', 'click', 'dblclick', 'contextmenu'] as const) {
+      this.card.addEventListener(type, (ev) => ev.stopPropagation());
+    }
+    this.card.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') {
+        ev.stopPropagation();
+        this.showCard(null);
+      }
+    });
     this.toastEl = document.createElement('div');
     this.toastEl.className = 'v3d-toast';
     this.toastEl.setAttribute('role', 'status');
@@ -119,7 +171,7 @@ export class Overlay {
       this.layout();
     });
     this.applyAttribOpen();
-    this.root.append(this.tools, this.note, this.attrib, this.attribBtn, this.msg, this.tip, this.toastEl);
+    this.root.append(this.tools, this.note, this.attrib, this.attribBtn, this.msg, this.tip, this.card, this.toastEl);
   }
 
   private applyAttribOpen(): void {
@@ -167,6 +219,7 @@ export class Overlay {
   layout(): void {
     const w = this.root.clientWidth;
     if (w === 0) return;
+    if (this.cardAnchor && !this.card.hidden) this.placeCard(this.cardAnchor.x, this.cardAnchor.y);
     const narrow = w < 560;
     this.root.classList.toggle('v3d-narrow', narrow);
     if (narrow) {
@@ -187,19 +240,74 @@ export class Overlay {
     if (text) this.msg.textContent = text;
   }
 
-  setTooltip(text: string | null, x = 0, y = 0): void {
+  /** ツールチップ（text は改行で行を分ける。note は小さめの文字で下に添える注意）。null で消す */
+  setTooltip(text: string | null, x = 0, y = 0, note?: string): void {
     if (!text) {
       this.tip.hidden = true;
       return;
     }
     this.tip.hidden = false;
-    if (this.tip.textContent !== text) this.tip.textContent = text;
+    if (this.tipText.textContent !== text) this.tipText.textContent = text;
+    const n = note ?? '';
+    if (this.tipNote.textContent !== n) this.tipNote.textContent = n;
+    this.tipNote.hidden = !n;
     const w = this.root.clientWidth;
     // 右端では左側に出す
     const flip = x > w - 290;
     this.tip.style.left = `${x}px`;
     this.tip.style.top = `${y}px`;
     this.tip.style.transform = flip ? 'translate(calc(-100% - 12px), 12px)' : 'translate(12px, 12px)';
+  }
+
+  /**
+   * 説明の札を出す（content は呼び出し側が textContent で作った要素。null で閉じる）。
+   * (x, y) は指し示す印の上端の画面座標（札はその上に出し、上が足りなければ印の下に出す）。onClose は閉じたときに呼ぶ。
+   */
+  showCard(content: HTMLElement | null, x = 0, y = 0, label = '', onClose?: () => void): void {
+    if (!content) {
+      if (this.card.hidden) return;
+      // 札の中（閉じるボタン・リンク）にフォーカスがあったら、3D の表示に戻す（フォーカスを見失わないように）
+      const hadFocus = this.card.contains(document.activeElement);
+      this.card.hidden = true;
+      if (hadFocus) this.root.querySelector<HTMLCanvasElement>('canvas')?.focus({ preventScroll: true });
+      this.cardBody.replaceChildren();
+      this.cardAnchor = null;
+      const cb = this.onCardClose;
+      this.onCardClose = null;
+      cb?.();
+      return;
+    }
+    this.onCardClose = onClose ?? null;
+    this.cardBody.replaceChildren(content);
+    if (label) this.card.setAttribute('aria-label', label);
+    else this.card.removeAttribute('aria-label');
+    this.card.hidden = false;
+    this.placeCard(x, y);
+  }
+
+  get cardOpen(): boolean {
+    return !this.card.hidden;
+  }
+
+  /** 札の位置を指し示す地点に合わせる（視点が動いたとき。null なら地点が画面の外なので隠す） */
+  placeCard(x: number | null, y = 0): void {
+    if (this.card.hidden) return;
+    if (x === null) {
+      this.card.style.visibility = 'hidden';
+      return;
+    }
+    this.card.style.visibility = '';
+    this.cardAnchor = { x, y };
+    const w = this.root.clientWidth;
+    const h = this.root.clientHeight;
+    const cw = this.card.offsetWidth;
+    const ch = this.card.offsetHeight;
+    const left = Math.max(8, Math.min(w - cw - 8, x - cw / 2));
+    // 印（避難場所のアイコン 約 26px）の上に 8px あけて出す。上が足りなければ印の下に
+    let top = y - ch - 8;
+    if (top < 8) top = Math.min(h - ch - 8, y + 34);
+    this.card.style.left = `${Math.round(left)}px`;
+    this.card.style.top = `${Math.round(Math.max(8, top))}px`;
   }
 
   setPlacing(on: boolean): void {

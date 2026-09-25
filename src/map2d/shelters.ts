@@ -6,6 +6,7 @@ import { Marker, Popup, type Map as MapLibreMap } from 'maplibre-gl';
 import type { Shelter } from '../core/types';
 import { SHELTER_STYLE } from './icons';
 import type { Poi } from '../data/poi';
+import { shelterNoticeElement } from './shelterNotice';
 
 /** 表示対象とするおおよその範囲（計算範囲より少し広く） */
 const NEAR = { west: 139.38, east: 139.56, south: 35.26, north: 35.39 };
@@ -119,7 +120,7 @@ export class ShelterLayer {
     const src = document.createElement('p');
     src.className = 'm2d-src';
     src.textContent = `出典: ${s.source}`;
-    box.appendChild(src);
+    box.append(src, shelterNoticeElement());
     this.popup.setLngLat([s.lon, s.lat]).setDOMContent(box).addTo(this.map);
   }
 

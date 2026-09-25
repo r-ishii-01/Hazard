@@ -36,7 +36,7 @@ import type { AppStore } from '../core/store';
 import type { AppActions } from '../core/controller';
 import { resultParams, usableOutput } from '../core/results';
 import { INITIAL_CENTER, createGridSpec, lonLatToLocalMeters, metersPerPixel, TILE_SIZE, type GridSpec } from '../core/geo';
-import { CELL_LAND, CELL_SEA, type AppState, type Basemap, type MapFocus, type SimOutput, type TerrainGrid } from '../core/types';
+import { CELL_LAND, CELL_SEA, type AppState, type Basemap, type MapFocus, type Shelter, type SimOutput, type TerrainGrid } from '../core/types';
 import {
   ARRIVAL_CLASSES,
   BASEMAPS,
@@ -56,9 +56,9 @@ import { PeopleLayer } from './people';
 import { HeightSampler } from './sampler';
 import { ShelterLayer } from './shelters';
 import { TerrainLayer } from './terrain';
-import { TileCanvas, sameExtent } from './tileCanvas';
+import { TileCanvas, sameExtent, type TileCanvasOptions, type TileCanvasStatus } from './tileCanvas';
 import { WaterLayer, type FloodColorMode } from './water';
-import { hazardTileMayExist } from '../map2d/hazardTiles';
+import { HAZARD_TILE_TIMEOUT_MS, hazardTileMayExist } from '../map2d/hazardTiles';
 
 /** 初期視点: 沖合の南南西から、仰角 約45° で鵠沼海岸を見る */
 const INITIAL_AZIMUTH_DEG = 202;
@@ -193,7 +193,12 @@ export class View3D {
   private sheltersDirty = true;
   /** 建物に付ける色分けのテクスチャ（最大浸水深・到達時間） */
   private overlayTex: DataTexture | null = null;
+  /** 説明の札を出している避難場所（クリック・タップで開く。視点が動いたら札も動かす） */
+  private cardShelter: Shelter | null = null;
+  /** 建物の読み込みの状態（取得できなくなったときに一度だけ知らせる） */
+  private buildingsStatus = '';
   private readonly unsubscribe: () => void;
+  private readonly unsubscribeDisplay: () => void;
 
   constructor(container: HTMLElement, store: AppStore, actions: AppActions) {
     this.container = container;
@@ -236,11 +241,19 @@ export class View3D {
         if (!this.active) this.releaseOutput();
       },
     );
+    // 公式ハザードマップの接続を確かめ直した（「再試行」など）: 取得できなかったタイルを読み込み直す
+    this.unsubscribeDisplay = store.select(
+      (st) => st.officialInundation.display,
+      (d) => {
+        if (d === 'checking') this.retryHazardTiles();
+      },
+    );
     // E2E テスト・デバッグ用
     (container as HTMLElement & { __view3d?: View3D }).__view3d = this;
     this.buildings = new BuildingLayer(() => {
       this.needsRender = true;
       this.seen.attribution = '';
+      this.onBuildingsUpdate();
     });
 
     try {
@@ -327,11 +340,15 @@ export class View3D {
       this.needsRender = true;
       this.touch();
       this.resize();
+      // 2D 地図の表示中に知らせた公式ハザードマップの取得の可否は 2D 地図のもの。3D で表示しているものに合わせ直す
+      const hz = this.hazardTiles;
+      if (hz && (hz.status !== 'loading' || hz.failedTiles > 0)) this.reportHazard(hz.failedTiles > 0 ? 'partial' : hz.status);
       if (!this.raf && this.renderer) this.raf = requestAnimationFrame(this.frame);
     } else {
       if (this.raf) cancelAnimationFrame(this.raf);
       this.raf = 0;
       this.overlay.setTooltip(null);
+      this.overlay.showCard(null);
     }
   }
 
@@ -340,6 +357,7 @@ export class View3D {
     this.disposed = true;
     this.active = false;
     this.unsubscribe();
+    this.unsubscribeDisplay();
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.ro?.disconnect();
@@ -387,7 +405,7 @@ export class View3D {
     seen.overlayFrames = -1;
     seen.t = NaN;
     this.water.releaseOutput();
-    // 人物の避難計画も（計画は、計算結果を参照する状態判定のキャッシュのキーになっている）
+    // 人物の避難計画と経路も（古い計画は使わない。次に表示するときに今の計画から作り直す）
     seen.plans = null;
     this.people.releasePlans();
   }
@@ -470,6 +488,11 @@ export class View3D {
     }
     // 人物のラベル・目印に重なる避難場所のアイコンは薄くする
     if (this.store.get().layers.shelters) this.shelters.declutter(rects, this.camera, w, h);
+    // 避難場所の説明の札は、視点が動いてもその避難場所を指すように
+    if (this.cardShelter && this.overlay.cardOpen) {
+      const p = this.shelters.screenPos(this.cardShelter, this.camera, w, h);
+      this.overlay.placeCard(p ? p.x : null, p ? p.y : 0);
+    }
     r.render(this.scene, this.camera);
     this.needsRender = false;
     this.lastRender = now;
@@ -537,13 +560,16 @@ export class View3D {
 
     if (s.layers.buildings !== seen.buildingsOn) {
       seen.buildingsOn = s.layers.buildings;
+      // 取得できなかった後に入れ直したときは、もう一度読み込む（buildings.ts）
       this.buildings.setEnabled(s.layers.buildings);
+      this.buildingsStatus = this.buildings.status;
       seen.attribution = '';
       this.touch();
     }
     if (s.layers.shelters !== seen.sheltersOn) {
       seen.sheltersOn = s.layers.shelters;
       this.shelters.group.visible = s.layers.shelters;
+      if (!s.layers.shelters) this.overlay.showCard(null);
       this.touch();
     }
 
@@ -613,6 +639,8 @@ export class View3D {
       seen.shelters = s.shelters;
       this.shelters.set(s.shelters, this.sampler);
       this.sheltersDirty = true;
+      // 避難場所を置き直した（データ・地形が変わった）: 前の札は閉じる
+      this.overlay.showCard(null);
     }
     if (this.sheltersDirty) {
       this.sheltersDirty = false;
@@ -694,8 +722,15 @@ export class View3D {
     if (hazardOn !== seen.hazardOn) {
       seen.hazardOn = hazardOn;
       this.hazardTiles?.dispose();
-      // 公式の浸水想定はズーム15（約4.8 m/画素）で十分（地形のセルは約8〜31 m）。存在しないタイルは要求しない
-      this.hazardTiles = hazardOn ? this.createTiles(grid, HAZARD_TSUNAMI_TILES, 15, (x, y, z) => hazardTileMayExist(z, x, y)) : null;
+      // 公式の浸水想定はズーム15（約4.8 m/画素）で十分（地形のセルは約8〜31 m）。存在しないタイルは要求しない。
+      // 取得できたか（1枚でも取得できなければ、色が無い所も浸水しないという意味ではないことを画面に示す）をコントローラに知らせる
+      this.hazardTiles = hazardOn
+        ? this.createTiles(grid, HAZARD_TSUNAMI_TILES, 15, (x, y, z) => hazardTileMayExist(z, x, y), (status) => this.reportHazard(status), {
+            // 1 枚でも取得できなければ、全部の処理が終わるのを待たずに知らせる
+            onTileError: () => this.reportHazard('partial'),
+            timeoutMs: HAZARD_TILE_TIMEOUT_MS,
+          })
+        : null;
       seen.hazardOpacity = -1;
       seen.attribution = '';
       this.touch();
@@ -726,10 +761,18 @@ export class View3D {
     };
   }
 
-  private createTiles(grid: TerrainGrid, source: (typeof BASEMAPS)['pale'], maxZoom: number, exists?: (x: number, y: number, z: number) => Promise<boolean>): TileCanvas {
+  private createTiles(
+    grid: TerrainGrid,
+    source: (typeof BASEMAPS)['pale'],
+    maxZoom: number,
+    exists?: (x: number, y: number, z: number) => Promise<boolean>,
+    done?: (status: TileCanvasStatus) => void,
+    extra: Pick<TileCanvasOptions, 'onTileError' | 'timeoutMs'> = {},
+  ): TileCanvas {
     const r = this.renderer!;
     const spec = grid.spec;
-    return new TileCanvas({
+    const tc: TileCanvas = new TileCanvas({
+      ...extra,
       spec,
       source,
       maxSize: Math.min(MAX_TEXTURE, r.capabilities.maxTextureSize),
@@ -747,8 +790,44 @@ export class View3D {
         if (status === 'failed') console.info(`[view3d] タイルを取得できませんでした（${source.label}）。代替表示を使います。`);
         this.seen.attribution = '';
         this.needsRender = true;
+        // 作り直した後に前のキャンバスの知らせが届いても使わない
+        if (!this.disposed && [this.basemapTiles, this.reliefTiles, this.hazardTiles].includes(tc)) done?.(status);
       },
     });
+    return tc;
+  }
+
+  /**
+   * 公式ハザードマップ（3D の地形に貼るタイル）を取得できたかをコントローラに知らせる。
+   * 1枚でも取得できなかった（'failed'・'partial'）なら false: 地図に色が無い所も「浸水しない」という意味ではないことを
+   * HUD の凡例・レイヤーのタブに示す。全部取得できた（データの無い所は 404 で、失敗ではない）なら true。
+   */
+  private reportHazard(status: TileCanvasStatus): void {
+    // 2D 地図の表示中は 2D 側が知らせる（3D の状態は、表示したときに知らせ直す）
+    if (!this.active || !this.store.get().layers.officialHazard) return;
+    if (status === 'failed' || status === 'partial') this.actions.reportOfficialHazardDisplay(false);
+    else if (status === 'ready') this.actions.reportOfficialHazardDisplay(true);
+  }
+
+  /** 公式ハザードマップのタイルを取得できなかったとき、読み込み直す（「再試行」で接続を確かめ直したとき） */
+  private retryHazardTiles(): void {
+    const tc = this.hazardTiles;
+    // 取得できなかったタイルがあれば（残りをまだ読み込み中でも）作り直す
+    if (!tc || (tc.status !== 'failed' && tc.status !== 'partial' && tc.failedTiles === 0)) return;
+    // 次のフレームの applyTiles で作り直す（表示中でなければ、表示したときに）
+    this.seen.hazardOn = false;
+    this.needsRender = true;
+  }
+
+  /** 3D 建物を取得できなくなったら一度だけ知らせる（「建物」を入れ直すと再試行する） */
+  private onBuildingsUpdate(): void {
+    const st = this.buildings?.status ?? '';
+    if (st === this.buildingsStatus) return;
+    const was = this.buildingsStatus;
+    this.buildingsStatus = st;
+    if (st === 'failed' && was !== 'failed' && this.active && this.store.get().layers.buildings) {
+      this.overlay.toast('3D の建物（OpenFreeMap）を読み込めませんでした。レイヤーの「建物（3D）」を入れ直すと、もう一度読み込みます。');
+    }
   }
 
   private overlayColors(grid: TerrainGrid, output: SimOutput, mode: 'maxDepth' | 'arrival'): Uint8ClampedArray {
@@ -1135,8 +1214,28 @@ export class View3D {
       return;
     }
     const id = this.people.pick(x, y, this.camera, this.viewportW, this.viewportH);
-    if (id) this.actions.selectPerson(id);
-    else if (s.selectedPersonId) this.actions.selectPerson(null);
+    if (id) {
+      this.overlay.showCard(null);
+      this.actions.selectPerson(id);
+      return;
+    }
+    // 避難場所: 説明の札（利用上の注意と、藤沢市の津波避難ビル一覧へのリンク）を出す。もう一度押すと閉じる
+    const sh = s.layers.shelters ? this.shelters.pick(x, y, this.camera, this.viewportW, this.viewportH) : null;
+    if (sh) {
+      if (this.cardShelter === sh && this.overlay.cardOpen) {
+        this.overlay.showCard(null);
+        return;
+      }
+      this.overlay.setTooltip(null);
+      const p = this.shelters.screenPos(sh, this.camera, this.viewportW, this.viewportH) ?? { x, y };
+      this.cardShelter = sh;
+      this.overlay.showCard(ShelterLayer.card(sh), p.x, p.y, `${sh.name}（避難場所の説明）`, () => {
+        this.cardShelter = null;
+      });
+      return;
+    }
+    this.overlay.showCard(null);
+    if (s.selectedPersonId) this.actions.selectPerson(null);
   }
 
   private processHover(now: number): void {
@@ -1147,6 +1246,7 @@ export class View3D {
     const s = this.store.get();
     // ツールチップ（人物 → 避難場所）
     let tip: string | null = null;
+    let note: string | undefined;
     const id = this.people.pick(x, y, this.camera, this.viewportW, this.viewportH);
     if (id) {
       const sx = scaleLabel(this.scale);
@@ -1156,9 +1256,14 @@ export class View3D {
       tip = `現在地（位置情報）\n精度 約 ${loc.accuracyM >= 1000 ? `${(loc.accuracyM / 1000).toFixed(1)} km` : `${Math.round(loc.accuracyM)} m`}${loc.insideDomain ? '' : '\n※ 計算範囲の外です'}`;
     } else if (s.layers.shelters) {
       const sh = this.shelters.pick(x, y, this.camera, this.viewportW, this.viewportH);
-      if (sh) tip = ShelterLayer.describe(sh);
+      if (sh) {
+        tip = ShelterLayer.describe(sh);
+        note = ShelterLayer.notice();
+      }
     }
-    this.overlay.setTooltip(tip, x, y);
+    // 説明の札を出している避難場所のツールチップは出さない（同じ内容が札にある）
+    if (tip && note && this.overlay.cardOpen) tip = null;
+    this.overlay.setTooltip(tip, x, y, note);
     // カーソル位置の情報
     const hit = this.pickGround(x, y);
     if (!hit) {

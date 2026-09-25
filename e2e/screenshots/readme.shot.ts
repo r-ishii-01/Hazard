@@ -1,6 +1,6 @@
 /**
  * README 用のスクリーンショット（e2e/screenshots.config.ts で実行: `npm run screenshots`）。
- * 実際の地理院タイルなどを読み込み、相模トラフ西側モデル（震度7）を「標準」解像度・30 分で計算して撮影する。
+ * 実際の地理院タイルなどを読み込み、既定の条件（震度7 → 相模トラフ西側モデル、解像度「標準」、計算時間 90 分）で計算して撮影する。
  * 保存先: docs/screenshots/*.jpg（JPEG 品質 80 前後。1 枚あたり 400 KB 程度以下に収める）
  *   2d-inundation.jpg（2D の浸水）・hazard-overlay.jpg（公式ハザードマップ）・person-panel.jpg（人物の評価）・
  *   3d-view.jpg（3D）・mobile-map.jpg / mobile-sheet.jpg（スマートフォン）
@@ -12,8 +12,6 @@ import { expect, test, type Page } from '@playwright/test';
 const OUT_DIR = fileURLToPath(new URL('../../docs/screenshots/', import.meta.url));
 const MAX_BYTES = 400 * 1024;
 
-/** 計算時間 [分]（相模トラフ西側モデルは 8 分に最大の波が来る） */
-const DURATION_MIN = 30;
 
 /** 人物を置く位置の目安（ここから北へ進んで最初の陸のセルに置く） */
 const PEOPLE: { kind: 'elderly' | 'adult' | 'wheelchair'; lon: number; lat: number; name: string; startDelayMin?: number }[] = [
@@ -39,11 +37,16 @@ async function openApp(page: Page): Promise<void> {
 
 /** 計算を実行して完了を待ち、陸の浸水セルが最も多い時刻 [秒] を返す */
 async function runSimulation(page: Page): Promise<number> {
-  await page.evaluate((duration) => {
+  // 既定の条件（震度7 → 相模トラフ西側モデル。解像度・計算時間もシナリオの既定値）で撮る
+  await page.evaluate(() => {
     const { actions } = window.__app;
     actions.selectShindo('7');
-    actions.updateParams({ durationMin: duration });
-  }, DURATION_MIN);
+  });
+  const params = await page.evaluate(() => {
+    const p = window.__app.store.get().params;
+    return { scenario: p.scenario.id, resolution: p.resolution, durationMin: p.durationMin };
+  });
+  expect(params, '既定の条件で撮影する').toEqual({ scenario: 'sagami-west', resolution: 'standard', durationMin: 90 });
   await page.waitForFunction(() => window.__app.store.get().terrain.status === 'ready', null, { timeout: 180_000 });
   await page.evaluate(() => window.__app.actions.runSimulation());
   await page.waitForFunction(() => ['done', 'error'].includes(window.__app.store.get().sim.status), null, { timeout: 600_000, polling: 1000 });
@@ -163,11 +166,13 @@ test.describe('デスクトップ', () => {
     const tBest = await runSimulation(page);
 
     // (1) 2D の浸水（最も広く浸水している時刻）。辻堂〜江の島が入るよう少し引いて表示し、
-    //     結果の要約が見えるよう「条件を調整する」を閉じる
+    //     結果の要約が見えるよう「条件を調整する」を閉じる。
+    //     広い画面の 2D 地図は左上の HUD の幅だけ左に余白をとり、中心を HUD に隠れない部分の中央に表示するので、
+    //     中心はその分だけ東（鵠沼海岸の人物の辺り）にする
     await page.evaluate((t) => {
       window.__app.actions.pause();
       window.__app.actions.seek(t);
-      window.__map2d?.map.jumpTo({ center: [139.462, 35.3125], zoom: 13.45 });
+      window.__map2d?.map.jumpTo({ center: [139.4695, 35.315], zoom: 13.45 });
     }, tBest);
     await page.locator('#panel-quake details.section-details > summary').click();
     await page.locator('#panel-quake .results').scrollIntoViewIfNeeded();
@@ -195,7 +200,7 @@ test.describe('デスクトップ', () => {
       ({ id, t }) => {
         window.__app.actions.selectPerson(id);
         window.__app.actions.seek(t);
-        window.__map2d?.map.jumpTo({ center: [139.4705, 35.3135], zoom: 14.3 });
+        window.__map2d?.map.jumpTo({ center: [139.475, 35.3135], zoom: 14.3 });
       },
       { id: ids[0], t: Math.min(tBest, 11 * 60) },
     );
@@ -229,7 +234,7 @@ test.describe('スマートフォン', () => {
     await page.evaluate((t) => {
       window.__app.actions.pause();
       window.__app.actions.seek(t);
-      window.__map2d?.map.jumpTo({ center: [139.4685, 35.3135], zoom: 13.7 });
+      window.__map2d?.map.jumpTo({ center: [139.4685, 35.3185], zoom: 13.7 });
     }, tBest);
     // 出典の表示（MapLibre の折りたたみ式の出典）が地図を大きく覆う場合は閉じる（出典は README に記載）
     await page.evaluate(() => {

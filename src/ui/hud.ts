@@ -54,26 +54,26 @@ export function warningShowSec(sc: Pick<QuakeScenario, 'id' | 'shindo' | 'warnin
   return isFarField(sc) ? null : JMA_ISSUE_TARGET_SEC;
 }
 
+/** 気象庁の表の「内容」の文末（発表する内容の説明の形） */
+const JMA_ANNOUNCE_SUFFIX = '旨を発表します。';
+
 /**
  * 警報カードの本文（とるべき行動）と、詳細に添える参考。
  *
- * 津波予報（若干の海面変動）は、気象庁の「津波予報の発表条件」の表の 2 つの場合のうち、
- * 「0.2m未満の海面変動が予想されたとき」（被害の心配はなく、特段の防災対応の必要がない）がこの例にあたる。
- * もう一方の「津波注意報解除後も海面変動が継続するとき」の文言は、注意報が出ていないこの例には当てはまらないので、
- * 本文には出さず、参考として分けて示す。
+ * 津波予報（若干の海面変動）の action は、気象庁の表「津波予報の発表条件」の「0.2m未満の海面変動が予想されたとき」の
+ * 内容（「…旨を発表します。」）なので、カードでは発表される内容として「…とされています（気象庁の津波予報）。」と示す。
+ * 同じ表のもう一つの場合（note:「津波注意報解除後も海面変動が継続するとき」）は、注意報が出ていないこの例には
+ * 当てはまらないので、本文には出さず、詳細に参考として示す。
  */
-export function warningCardText(level: WarningLevel, w: Pick<WarningInfo, 'action' | 'damage'>): { action: string; reference: string } {
-  if (level !== 'forecast') return { action: w.action ?? '', reference: '' };
-  const damage = (w.damage ?? '').trim();
-  const action = damage
-    ? damage.endsWith('旨を発表します。')
-      ? `${damage.slice(0, -'旨を発表します。'.length)}とされています（気象庁の津波予報）。`
-      : damage
-    : '';
+export function warningCardText(level: WarningLevel, w: Pick<WarningInfo, 'label' | 'action' | 'note'>): { action: string; reference: string } {
   const raw = (w.action ?? '').trim();
-  const POST_ADVISORY = '（津波注意報解除後も海面変動が継続するとき）';
-  const reference = raw.startsWith(POST_ADVISORY) ? `参考: 津波注意報の解除後も海面変動が続くときの津波予報では、${raw.slice(POST_ADVISORY.length)}` : '';
-  return { action: action || (reference ? '' : raw), reference };
+  const action =
+    level === 'forecast' && raw.endsWith(JMA_ANNOUNCE_SUFFIX) ? `${raw.slice(0, -JMA_ANNOUNCE_SUFFIX.length)}とされています（気象庁の津波予報）。` : raw;
+  const note = w.note;
+  // 「津波予報（若干の海面変動）」→「津波予報」（「若干の海面変動」は 0.2m 未満の場合の呼び方なので、別の場合の説明には付けない）
+  const kind = (w.label ?? '').replace(/（.*$/, '');
+  const reference = note?.when && note.text ? `参考: 「${note.when}」の${kind}では、${note.text.replace(/。$/, '')}（気象庁）。` : '';
+  return { action, reference };
 }
 
 /** HUD の凡例を折りたたんでいるか（閲覧者ごとの見た目の好みだけを保存） */

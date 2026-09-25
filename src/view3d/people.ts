@@ -26,7 +26,7 @@ import { createFigureGeometry } from './figures';
 import { LabelSprite } from './labels';
 import type { HeightSampler } from './sampler';
 
-/** 状態の表示名と色（people モジュールの定義に合わせる） */
+/** 状態の色（people モジュールの定義に合わせる）。表示名は personStatusLabel（「その場にとどまる」人は「とどまっている」） */
 export const STATUS_COLORS: Record<PersonStatus, string> = {
   waiting: PERSON_STATUS_INFO.waiting?.color ?? '#64748b',
   evacuating: PERSON_STATUS_INFO.evacuating?.color ?? '#2563eb',
@@ -36,21 +36,12 @@ export const STATUS_COLORS: Record<PersonStatus, string> = {
   critical: PERSON_STATUS_INFO.critical?.color ?? '#b91c1c',
 };
 
-export const STATUS_LABELS: Record<PersonStatus, string> = {
-  waiting: PERSON_STATUS_INFO.waiting?.label ?? '避難開始前',
-  evacuating: PERSON_STATUS_INFO.evacuating?.label ?? '避難中',
-  safe: PERSON_STATUS_INFO.safe?.label ?? '避難完了',
-  caution: PERSON_STATUS_INFO.caution?.label ?? '浸水（注意）',
-  danger: PERSON_STATUS_INFO.danger?.label ?? '歩行困難（危険）',
-  critical: PERSON_STATUS_INFO.critical?.label ?? '生命の危険',
-};
-
 /** 状態の輪の最小の大きさ（外径の半径）[CSS px] */
 const RING_MIN_PX = 7;
 /** 状態の輪の外径の半径 [m]（ringGeo の外径） */
 const RING_OUTER_M = 0.66;
 
-/** 小さいラベル用の短い状態名 */
+/** 小さいラベル用の短い状態名（「その場にとどまる」人の 'waiting' は STAY_STATUS_LABEL を使う） */
 const STATUS_SHORT: Record<PersonStatus, string> = {
   waiting: '開始前',
   evacuating: '避難中',
@@ -212,9 +203,9 @@ export class PeopleLayer {
   }
 
   /**
-   * 避難計画への参照を手放す（3D を表示していない間に新しい計算が始まったとき）。
-   * 計画は計算結果と結びついたデータ（people の状態判定のキャッシュ）から参照されるので、
-   * 古い計画を持ち続けると古い計算結果もメモリに残る。次の sync で今の計画から作り直す。
+   * 避難計画への参照と経路のメッシュを手放す（3D を表示していない間に新しい計算が始まったとき）。
+   * 古い計画は使わないので持ち続けない（状態判定のキャッシュ〔people/state.ts〕は計算結果をキーにしているので、
+   * 計画から古い計算結果が残ることはない）。次の sync で今の計画から作り直す。
    */
   releasePlans(): void {
     for (const e of this.entries.values()) {
@@ -562,7 +553,8 @@ export class PeopleLayer {
       lines.push(`${status}・${depth}`);
       if (st.message && st.message !== status) lines.push(st.message);
     }
-    if (e.plan?.target) lines.push(`目標: ${e.plan.target.name}`);
+    // 避難先の名前は選んだ根拠を含む全文（地図の札は短い形。src/map2d/targetName.ts）
+    if (e.plan?.target) lines.push(`避難先: ${e.plan.target.name}`);
     return lines.join('\n');
   }
 

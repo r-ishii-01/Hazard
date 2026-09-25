@@ -10,7 +10,8 @@
  * - 頂点データは GPU に送った後に手放す（JavaScript 側に数十 MB を残さない）。GPU のリセット後は rebuild で作り直す
  * - 最大浸水深・到達時間・公式の浸水想定を地形に重ねるときは、建物にも足元の色を付ける
  *   （斜めから見ると地面の多くが建物に隠れ、色分けが読み取れないため）
- * 取得できないときは静かに諦める（console.info を1回だけ）。
+ * 取得できないときは諦める（console.info を1回だけ。3D ビューが画面に短く知らせる）。「建物」を入れ直すと、もう一度読み込む。
+ * TileJSON・タイルの取得には時間の上限を設ける（応答が無いまま待ち続けて「読み込み中」のまま止まらないように）。
  */
 import {
   BufferAttribute,
@@ -27,11 +28,16 @@ import {
 } from 'three';
 import { gridTileRange } from '../core/geo';
 import { OPENFREEMAP } from '../data/sources';
+import { withTimeout } from '../ui/geoSearch';
 import { BUILDING_ZOOM, buildTileSteps, type BuiltTile } from './buildingMesh';
 import type { HeightSampler } from './sampler';
 
 const ZOOM = BUILDING_ZOOM;
 const MAX_CONCURRENT = 4;
+/** TileJSON の取得の時間の上限 [ms] */
+export const TILEJSON_TIMEOUT_MS = 10_000;
+/** 建物タイル 1 枚の取得の時間の上限 [ms]（z14 のタイルは大きいもので 1 MB 前後） */
+export const BUILDING_TILE_TIMEOUT_MS = 20_000;
 /** Worker を使えないときに、画面の処理の中で続けて作る時間の上限 [ms] */
 const SLICE_MS = 8;
 
@@ -168,8 +174,15 @@ export class BuildingLayer {
   }
 
   setEnabled(on: boolean): void {
+    const wasOn = this.enabled;
     this.enabled = on;
     this.group.visible = on;
+    // 取得できなかった後に入れ直した: もう一度読み込む（取得できたタイルは保持しているので、読み直すのは足りない分だけ）
+    if (on && !wasOn && this.status === 'failed') {
+      this.status = 'idle';
+      this.built = false;
+      this.warned = false;
+    }
     if (on && !this.built) this.start();
   }
 
@@ -202,9 +215,14 @@ export class BuildingLayer {
 
   private async load(sampler: HeightSampler, gen: number, signal: AbortSignal): Promise<void> {
     if (!this.tilesUrl) {
-      const res = await fetch(OPENFREEMAP.tilejson, { signal, mode: 'cors', credentials: 'omit' });
-      if (!res.ok) throw new Error(`TileJSON HTTP ${res.status}`);
-      const tj = (await res.json()) as { tiles?: string[] };
+      const tj = await withTimeout(
+        async (sig) => {
+          const res = await fetch(OPENFREEMAP.tilejson, { signal: sig, mode: 'cors', credentials: 'omit' });
+          if (!res.ok) throw new Error(`TileJSON HTTP ${res.status}`);
+          return (await res.json()) as { tiles?: string[] };
+        },
+        { signal, timeoutMs: TILEJSON_TIMEOUT_MS },
+      );
       if (!tj.tiles || !tj.tiles[0]) throw new Error('TileJSON に tiles がありません');
       this.tilesUrl = tj.tiles[0];
     }
@@ -226,14 +244,16 @@ export class BuildingLayer {
         let buf = this.cache.get(key);
         if (buf === undefined) {
           try {
-            const res = await fetch(url.replace('{z}', String(ZOOM)).replace('{x}', String(t.x)).replace('{y}', String(t.y)), {
-              signal,
-              mode: 'cors',
-              credentials: 'omit',
-            });
-            if (res.status === 404 || res.status === 204) buf = null;
-            else if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            else buf = await res.arrayBuffer();
+            const tileUrl = url.replace('{z}', String(ZOOM)).replace('{x}', String(t.x)).replace('{y}', String(t.y));
+            buf = await withTimeout(
+              async (sig) => {
+                const res = await fetch(tileUrl, { signal: sig, mode: 'cors', credentials: 'omit' });
+                if (res.status === 404 || res.status === 204) return null;
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.arrayBuffer();
+              },
+              { signal, timeoutMs: BUILDING_TILE_TIMEOUT_MS },
+            );
             this.cache.set(key, buf);
           } catch (e) {
             if (signal.aborted) return;

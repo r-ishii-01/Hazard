@@ -5,6 +5,7 @@
  * 判定のため、人物×計画×計算結果ごとに浸水深の時系列を一度だけサンプリングしてキャッシュし、
  * 計算結果のフレームが増えたら増えた分だけ追加で調べる（毎フレームの計算は二分探索と数回の参照のみ）。
  * 計画が作り直されると（別のオブジェクトになるので）キャッシュも作り直される。
+ * キャッシュは計算結果をキーにしているので、古い計画を持ち続けても古い計算結果はメモリに残らない。
  *
  * 状態・浸水深はいずれもモデルによる計算上の値で、個人の実際の被害を予測するものではない。
  */
@@ -189,7 +190,6 @@ export interface CriticalHit {
 }
 
 interface Track {
-  output: SimOutput;
   personLon: number;
   personLat: number;
   /** ここまでの時刻は調べ済み */
@@ -205,7 +205,12 @@ interface Track {
   hit: CriticalHit | null;
 }
 
-const tracks = new WeakMap<object, Track>();
+/**
+ * 判定のキャッシュ: 計算結果 → （計画、計画が無ければ人物）→ Track。
+ * 外側のキーを計算結果にし、Track からは計算結果を参照しない。こうすると、古い計画や人物のオブジェクトを
+ * どこかが持ち続けても、古い計算結果（全フレーム）はメモリに残らない（計算結果が要らなくなれば内側の表ごと消える）。
+ */
+const tracks = new WeakMap<SimOutput, WeakMap<object, Track>>();
 
 /** サンプリング間隔: フレーム間隔を割り切る値で、移動中に1セルあたり2回以上調べられる細かさ */
 function sampleStep(person: Person, output: SimOutput): { step: number; div: number } {
@@ -217,11 +222,16 @@ function sampleStep(person: Person, output: SimOutput): { step: number; div: num
 
 function getTrack(person: Person, plan: EvacPlan | undefined, output: SimOutput): Track {
   const key: object = plan ?? person;
-  let tr = tracks.get(key);
-  if (!tr || tr.output !== output || tr.personLon !== person.lon || tr.personLat !== person.lat) {
+  let byKey = tracks.get(output);
+  if (!byKey) {
+    byKey = new WeakMap();
+    tracks.set(output, byKey);
+  }
+  let tr = byKey.get(key);
+  if (!tr || tr.personLon !== person.lon || tr.personLat !== person.lat) {
     const { step, div } = sampleStep(person, output);
-    tr = { output, personLon: person.lon, personLat: person.lat, until: -Infinity, next: 0, prev: -1, step, div, hit: null };
-    tracks.set(key, tr);
+    tr = { personLon: person.lon, personLat: person.lat, until: -Infinity, next: 0, prev: -1, step, div, hit: null };
+    byKey.set(key, tr);
   }
   return tr;
 }
@@ -235,9 +245,8 @@ function getTrack(person: Person, plan: EvacPlan | undefined, output: SimOutput)
  * - 区間の終わり（upTo がサンプル時刻でない場合）も調べるので、ある時刻に critical と判定されたら、
  *   それより後の時刻でも必ず critical になる（sticky）。
  */
-function extendTrack(tr: Track, person: Person, plan: EvacPlan | undefined, upTo: number): void {
+function extendTrack(tr: Track, output: SimOutput, person: Person, plan: EvacPlan | undefined, upTo: number): void {
   if (tr.hit) return;
-  const output = tr.output;
   const limit = Math.min(upTo, output.timeReady());
   if (!(limit > tr.until)) return;
   const depthOf = (t: number) => {
@@ -313,7 +322,7 @@ export function criticalEncounter(
 ): CriticalHit | null {
   if (!output || output.framesReady() <= 0) return null;
   const tr = getTrack(person, plan, output);
-  extendTrack(tr, person, plan, t);
+  extendTrack(tr, output, person, plan, t);
   return tr.hit && tr.hit.t <= t ? tr.hit : null;
 }
 

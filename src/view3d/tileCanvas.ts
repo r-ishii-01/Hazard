@@ -5,10 +5,12 @@
  * - キャンバスの左上 = グリッド北西角、右下 = グリッド南東角（UV の v は北→南、flipY=false）
  * - 取得できなかった部分は透明のまま（シェーダ側で代替色に切り替える）
  * - 範囲が同じなら（解像度だけ変えたとき）キャンバスは作り直さず、足りないタイルだけ addTiles で追加する
+ * - 1 枚の取得には時間の上限を設ける（応答が無いまま待ち続けると onDone が呼ばれず、取得できないことを示せないため）
  */
 import { CanvasTexture, LinearFilter, LinearMipmapLinearFilter, SRGBColorSpace } from 'three';
 import { TILE_SIZE, type GridSpec } from '../core/geo';
 import type { RasterTileSource } from '../data/sources';
+import { withTimeout } from '../ui/geoSearch';
 
 export type TileCanvasStatus = 'loading' | 'ready' | 'partial' | 'failed';
 
@@ -30,10 +32,16 @@ export interface TileCanvasOptions {
   onFirstContent?: () => void;
   /** 全タイルの処理が終わった */
   onDone?: (status: TileCanvasStatus, loaded: number, failed: number) => void;
+  /** タイルを 1 枚取得できなかった（全部の処理が終わるのを待たずに知らせたいとき。failed はここまでの数） */
+  onTileError?: (failed: number) => void;
+  /** 1 枚の取得の時間の上限 [ms]（既定 TILE_TIMEOUT_MS） */
+  timeoutMs?: number;
 }
 
 const MAX_CONCURRENT = 6;
 const UPDATE_INTERVAL_MS = 1000;
+/** タイル 1 枚の取得の時間の上限 [ms] */
+export const TILE_TIMEOUT_MS = 20_000;
 
 /**
  * 2つの格子が同じ範囲を覆うか（解像度だけが違う）。同じならタイルのキャンバスの大きさ・位置も同じなので使い回せる
@@ -146,6 +154,11 @@ export class TileCanvas {
     this.opts.onDone?.(this.status, this.loaded, this.failed);
   }
 
+  /** ここまでに取得できなかったタイルの数 */
+  get failedTiles(): number {
+    return this.failed;
+  }
+
   private next(): void {
     if (this.disposed) return;
     const t = this.queue.shift();
@@ -175,7 +188,9 @@ export class TileCanvas {
         }
       })
       .catch(() => {
+        if (this.disposed) return;
         this.failed += 1;
+        this.opts.onTileError?.(this.failed);
       })
       .finally(() => {
         this.inflight -= 1;
@@ -186,13 +201,18 @@ export class TileCanvas {
 
   /** 1タイルを取得してデコード。404 等（タイルが存在しない）は null、通信失敗は例外 */
   private async loadTile(url: string): Promise<ImageBitmap | null> {
-    const res = await fetch(url, { signal: this.ac.signal, mode: 'cors', credentials: 'omit' });
-    if (!res.ok) {
-      if (res.status === 404 || res.status === 204) return null;
-      throw new Error(`HTTP ${res.status}`);
-    }
-    const blob = await res.blob();
-    if (blob.size === 0) return null;
+    const blob = await withTimeout(
+      async (signal) => {
+        const res = await fetch(url, { signal, mode: 'cors', credentials: 'omit' });
+        if (!res.ok) {
+          if (res.status === 404 || res.status === 204) return null;
+          throw new Error(`HTTP ${res.status}`);
+        }
+        return res.blob();
+      },
+      { signal: this.ac.signal, timeoutMs: this.opts.timeoutMs ?? TILE_TIMEOUT_MS },
+    );
+    if (!blob || blob.size === 0) return null;
     return createImageBitmap(blob);
   }
 

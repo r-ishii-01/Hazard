@@ -1,5 +1,7 @@
 /**
  * 避難場所のピン（細い柱＋頭のアイコン）。柱の高さは「見やすさ倍率」に比例。
+ * 説明（ツールチップ・クリックで出す札）には、指定緊急避難場所データの利用上の注意と、藤沢市の津波避難ビルの多くが
+ * 含まれないこと（札には市の一覧へのリンク）を添える（src/map2d/shelterNotice.ts。2D のポップアップと同じ）。
  */
 import {
   CylinderGeometry,
@@ -14,8 +16,9 @@ import {
   type CanvasTexture,
 } from 'three';
 import type { Shelter, ShelterKind } from '../core/types';
-import { SHELTER_LABELS, createShelterIcon, spriteScaleForPx } from './labels';
+import { SHELTER_COLORS, SHELTER_LABELS, createShelterIcon, spriteScaleForPx } from './labels';
 import type { HeightSampler } from './sampler';
+import { shelterNoticeElement, shelterNoticeText } from '../map2d/shelterNotice';
 
 const ICON_PX = 26;
 
@@ -129,12 +132,54 @@ export class ShelterLayer {
     return best;
   }
 
+  /** 画面座標でのアイコンの上端（中央）。画面の外・カメラの後ろなら null */
+  screenPos(shelter: Shelter, camera: Camera, w: number, h: number): { x: number; y: number } | null {
+    const i = this.shelters.indexOf(shelter);
+    if (i < 0) return null;
+    const v = this.v.copy(this.sprites[i].position).project(camera);
+    if (v.z > 1 || Math.abs(v.x) > 1.05 || Math.abs(v.y) > 1.05) return null;
+    return { x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h - ICON_PX };
+  }
+
+  /** ツールチップの本文（改行で行を分ける） */
   static describe(s: Shelter): string {
     const lines = [`${s.name}（${SHELTER_LABELS[s.kind] ?? s.kind}）`];
     if (s.safeHeightTP != null) lines.push(`避難可能な高さ: T.P. ${s.safeHeightTP.toFixed(1)} m`);
     if (s.address) lines.push(s.address);
     lines.push(`出典: ${s.source}`);
     return lines.join('\n');
+  }
+
+  /** ツールチップに添える注意（リンクは押せないので、クリック・タップで札を出せることを示す） */
+  static notice(): string {
+    return `${shelterNoticeText()}（クリック・タップすると、藤沢市「津波避難ビル」一覧へのリンクを表示します）`;
+  }
+
+  /** クリック・タップで出す札の中身（文字は textContent。市の一覧へのリンクつき） */
+  static card(s: Shelter): HTMLElement {
+    const box = document.createElement('div');
+    const kind = document.createElement('span');
+    kind.className = 'v3d-card-kind';
+    kind.style.background = SHELTER_COLORS[s.kind] ?? '#15803d';
+    kind.textContent = SHELTER_LABELS[s.kind] ?? s.kind;
+    const h = document.createElement('h4');
+    h.textContent = s.name;
+    box.append(kind, h);
+    if (s.address) {
+      const p = document.createElement('p');
+      p.textContent = s.address;
+      box.appendChild(p);
+    }
+    if (s.safeHeightTP != null && Number.isFinite(s.safeHeightTP)) {
+      const p = document.createElement('p');
+      p.textContent = `避難可能な高さ: T.P. ${s.safeHeightTP.toFixed(1)} m`;
+      box.appendChild(p);
+    }
+    const src = document.createElement('p');
+    src.className = 'v3d-card-src';
+    src.textContent = `出典: ${s.source}`;
+    box.append(src, shelterNoticeElement('v3d-shelter-note'));
+    return box;
   }
 
   private clear(): void {

@@ -14,6 +14,11 @@
  * 計算結果は core/results.ts の usableOutput（今の地形の格子の上で計算した結果）だけを描く。
  * 計算結果が変わったら、非表示のレイヤーが持っている前の結果への参照も手放す（全フレームをメモリに残さない）。
  * 背景地図・色別標高・公式ハザードマップのタイルを取得できないときは、地図の上に理由を表示する。
+ * 公式ハザードマップのタイルを取得できた・できなかったことはコントローラにも知らせる（HUD の凡例・レイヤーのタブが示す）。
+ *
+ * 広い画面では、地図の左上に重なる HUD（UI 担当、#hud .hud-tl。経過時間・警報・水位）の幅だけ地図の左に余白
+ * （MapLibre の padding）をとる。初期表示・地名検索などの移動先・「計算範囲を表示」は、HUD に隠れない所の中央に来る。
+ * HUD の大きさが変わっても、地図の見た目は動かさない（余白だけを変える）。
  */
 import {
   AttributionControl,
@@ -68,6 +73,12 @@ const ROUTE_INTERVAL_MS = 66;
 const TILE_RECOVER_MS = 3000;
 /** 地図の操作ボタンの大きさ（狭い画面・タッチ操作）[px] */
 const TOUCH_TARGET_PX = 40;
+/** HUD の分の余白をとる地図の幅の下限 [px]（これより狭い画面では HUD は上端の帯になり、余白はとらない） */
+const HUD_PAD_MIN_WIDTH = 820;
+/** HUD と地図の見える部分の間のすき間 [px] */
+const HUD_PAD_GAP = 12;
+/** HUD の分の余白の上限（地図の幅に対する割合） */
+const HUD_PAD_MAX_FRACTION = 0.4;
 
 /** 取得できないと知らせるタイルのソース（表示中のものだけ） */
 type NoticeSource = 'basemap' | 'relief' | 'hazard';
@@ -178,6 +189,13 @@ export class MapView2D {
   private pois: PoiLayer | null = null;
   private location: LocationLayer | null = null;
 
+  // HUD（左上）の分の地図の余白
+  private hudPad = 0;
+  private hudRO: ResizeObserver | null = null;
+  private hudObserved: Element | null = null;
+  private hudPadRaf = 0;
+  private hudPadAfterMove = false;
+
   // 視点の移動要求（地名検索・現在地）
   private lastFocusSeq = 0;
   /** 非表示の間に届いた要求（表示したときに反映） */
@@ -226,12 +244,15 @@ export class MapView2D {
 
     const s = store.get();
     const spec = this.currentSpec(s);
+    // 広い画面: 左上の HUD に隠れない部分に計算範囲の全体が入るズームにする（余白は地図を作った直後に設定）。
+    // 計算が始まると警報のカードが出て HUD が広がる（その後、地図は勝手に動かさない）ので、HUD の最大の幅の分をとっておく
+    const pad0 = this.measureHudPad(true);
     try {
       this.map = new MapLibreMap({
         container: this.root,
         style: buildStyle(s.basemap, s.layers, gridCornerCoordinates(spec)),
         center: [INITIAL_CENTER.lon, INITIAL_CENTER.lat],
-        zoom: domainZoomForWidth(container.clientWidth),
+        zoom: domainZoomForWidth(container.clientWidth - pad0),
         minZoom: 11,
         maxZoom: 18,
         maxBounds: MAX_BOUNDS,
@@ -256,6 +277,12 @@ export class MapView2D {
       return;
     }
     const map = this.map;
+    // 余白を設定すると、中心（計算範囲の中央）は HUD に隠れない部分の中央に表示される
+    if (pad0 > 0) {
+      map.setPadding({ top: 0, right: 0, bottom: 0, left: pad0 });
+      this.hudPad = pad0;
+    }
+    this.observeHud();
     this.shownBasemaps.add(s.basemap);
     this.currentBasemap = s.basemap;
     // 注記のある背景地図（淡色・標準）では、駅名が地図にも書かれていて二重になるので駅の地点ラベルを出さない
@@ -265,7 +292,10 @@ export class MapView2D {
     map.touchZoomRotate.disableRotation();
     map.keyboard.disableRotation();
     map.addControl(new NavigationControl({ showCompass: false, visualizePitch: false }), 'top-right');
-    map.on('resize', () => this.fitControls());
+    map.on('resize', () => {
+      this.fitControls();
+      this.scheduleHudPadding();
+    });
     map.addControl(new ScaleControl({ unit: 'metric', maxWidth: 110 }), 'bottom-left');
     // 各ソースの出典はソースごとに自動表示。主な地点（POI）は OSM 由来の位置を含むので常に表示する
     map.addControl(new AttributionControl({ compact: true, customAttribution: POIS.length ? POI_ATTRIBUTION : undefined }), 'bottom-right');
@@ -319,7 +349,17 @@ export class MapView2D {
     if (active && this.map) {
       this.map.resize();
       this.placeOverlays();
-      if (!was) this.dirty = ALL_DIRTY();
+      // 3D 表示の間に HUD の大きさが変わっていれば、余白を合わせる（移動の要求より先に）
+      this.updateHudPadding();
+      if (!was) {
+        this.dirty = ALL_DIRTY();
+        // 3D 表示の間に 3D 側が「取得できた」と知らせていても、この地図の公式ハザードマップに取得できなかった
+        // タイルが残っていれば、そのことを示し直して読み込み直す
+        if (this.tileTrouble.has(IDS.hazard)) {
+          this.reportHazard(false);
+          this.retryHazardTiles();
+        }
+      }
       // 3D 表示の間に届いた移動の要求は、表示したときにアニメーションなしで反映する
       const f = this.pendingFocus;
       this.pendingFocus = null;
@@ -339,6 +379,9 @@ export class MapView2D {
     window.clearTimeout(this.toastTimer);
     window.clearTimeout(this.noticeTimer);
     window.clearTimeout(this.fitTimer);
+    if (this.hudPadRaf) cancelAnimationFrame(this.hudPadRaf);
+    this.hudRO?.disconnect();
+    this.hudRO = null;
     window.removeEventListener('keydown', this.onKeyDown);
     this.unsubscribe?.();
     this.unsubscribe = null;
@@ -399,6 +442,8 @@ export class MapView2D {
     if (s.placing !== p.placing) d.placing = any = true;
     if (s.shelters !== p.shelters) d.shelters = any = true;
     if (s.focus !== p.focus) this.onFocus(s.focus);
+    // 公式ハザードマップの接続を確かめ直した（「再試行」など）: 取得できなかったタイルを読み込み直す
+    if (s.officialInundation.display !== p.officialInundation.display && s.officialInundation.display === 'checking') this.retryHazardTiles();
     if (s.userLocation !== p.userLocation) {
       this.location?.setUserLocation(s.userLocation);
       d.location = any = true;
@@ -426,7 +471,9 @@ export class MapView2D {
   private moveToFocus(f: MapFocus, animate: boolean): void {
     const map = this.map;
     if (!map || !Number.isFinite(f.lon) || !Number.isFinite(f.lat)) return;
-    const zoom = Number.isFinite(f.zoom) ? (f.zoom as number) : map.getZoom();
+    let zoom = Number.isFinite(f.zoom) ? (f.zoom as number) : map.getZoom();
+    // 「計算範囲を表示」（計算範囲の中央へ、地図の幅に合わせたズームで移動する要求）: HUD の分の余白を除いた幅に全体が入るように
+    if (isDomainFocus(f) && this.hudPad > 0) zoom = Math.min(zoom, domainZoomForWidth(this.root.clientWidth - this.hudPad));
     const center: [number, number] = [f.lon, f.lat];
     const offset = this.focusOffset();
     // 動きを減らす設定（prefers-reduced-motion）ではアニメーションしない。
@@ -465,6 +512,88 @@ export class MapView2D {
   private schedule(): void {
     if (this.raf || this.destroyed) return;
     this.raf = requestAnimationFrame(this.frame);
+  }
+
+  // -------------------------------------------------------------------------
+  // HUD（左上）の分の余白
+  // -------------------------------------------------------------------------
+
+  /**
+   * 左上の HUD（UI 担当、#hud .hud-tl）に隠れる幅 [px]（地図の左端から HUD の右端 + すき間）。
+   * 狭い画面（HUD は上端の帯になる）・HUD が見つからない・地図の左半分に重ならないときは 0。
+   * reserve: 今の幅ではなく、HUD が広がりうる最大の幅（CSS の max-width）で求める（初期表示用）。
+   */
+  private measureHudPad(reserve = false): number {
+    try {
+      const root = this.root.getBoundingClientRect();
+      if (root.width < HUD_PAD_MIN_WIDTH || root.height <= 0) return 0;
+      const hud = document.querySelector<HTMLElement>('#hud .hud-tl');
+      if (!hud) return 0;
+      const r = hud.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return 0;
+      if (r.left - root.left > root.width / 2 || r.top - root.top > root.height / 2 || r.bottom <= root.top) return 0;
+      let right = r.right - root.left;
+      if (reserve) right = Math.max(right, r.left - root.left + hudMaxWidth(hud));
+      if (right <= 0) return 0;
+      return Math.round(Math.min(right + HUD_PAD_GAP, root.width * HUD_PAD_MAX_FRACTION));
+    } catch {
+      return 0;
+    }
+  }
+
+  /** HUD の大きさの変化を見張る（HUD が作り直されたら見張る要素も替える） */
+  private observeHud(): void {
+    if (typeof ResizeObserver === 'undefined') return;
+    const el = document.querySelector('#hud .hud-tl');
+    if (el === this.hudObserved) return;
+    if (!this.hudRO) this.hudRO = new ResizeObserver(() => this.scheduleHudPadding());
+    if (this.hudObserved) this.hudRO.unobserve(this.hudObserved);
+    this.hudObserved = el;
+    if (el) this.hudRO.observe(el);
+  }
+
+  private scheduleHudPadding(): void {
+    if (this.hudPadRaf || this.destroyed) return;
+    this.hudPadRaf = requestAnimationFrame(() => {
+      this.hudPadRaf = 0;
+      this.updateHudPadding();
+    });
+  }
+
+  /**
+   * 余白を HUD の今の幅に合わせる。地図の見た目は動かさない（新しい余白での中心の位置にいま表示されている地点を中心にする）。
+   * 地図の移動中（地名検索の移動など）は、移動が終わってから合わせる。
+   */
+  private updateHudPadding(): void {
+    const map = this.map;
+    if (!map || !this.active || this.destroyed) return;
+    this.observeHud();
+    const pad = this.measureHudPad();
+    if (Math.abs(pad - this.hudPad) < 2) return;
+    if (map.isMoving()) {
+      if (!this.hudPadAfterMove) {
+        this.hudPadAfterMove = true;
+        map.once('moveend', () => {
+          this.hudPadAfterMove = false;
+          this.scheduleHudPadding();
+        });
+      }
+      return;
+    }
+    try {
+      const cur = map.getPadding();
+      const el = map.getContainer();
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      if (w <= 0 || h <= 0) return;
+      const x = pad + (w - pad - (cur.right ?? 0)) / 2;
+      const y = (cur.top ?? 0) + (h - (cur.top ?? 0) - (cur.bottom ?? 0)) / 2;
+      const center = map.unproject([x, y]);
+      map.jumpTo({ center, padding: { top: cur.top ?? 0, right: cur.right ?? 0, bottom: cur.bottom ?? 0, left: pad } });
+      this.hudPad = pad;
+    } catch (e) {
+      this.logOnce('hudPadding', e);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -983,16 +1112,20 @@ export class MapView2D {
   // -------------------------------------------------------------------------
 
   private onMapError = (e: { error?: unknown; sourceId?: string; tile?: unknown }): void => {
-    const err = e.error as { message?: string; status?: number; url?: string } | undefined;
+    const err = e.error as { message?: string; status?: number; url?: string; name?: string } | undefined;
     if (e.sourceId || e.tile) {
       // 公式ハザードマップは浸水想定のない区域のタイルが 404 になるのが通常なので記録しない
       if (err?.status === 404 && e.sourceId === IDS.hazard) return;
+      // 地図の移動などで要らなくなったタイルの取得を止めただけ（失敗ではない）
+      if (err?.name === 'AbortError') return;
       // タイルが存在しない（404 など）のではなく、取得できなかった: 地図の上に知らせる
       if (e.sourceId && this.noticeSource(e.sourceId) && err?.status !== 404 && err?.status !== 204) {
         const t = this.tileTrouble.get(e.sourceId) ?? { failedAt: 0, okAt: 0 };
         t.failedAt = performance.now();
         this.tileTrouble.set(e.sourceId, t);
         this.updateNotice();
+        // 公式ハザードマップ: 色が無い所も「浸水しない」という意味ではないことを HUD の凡例・レイヤーのタブにも示す
+        if (e.sourceId === IDS.hazard) this.reportHazard(false);
       }
       const key = `tile:${e.sourceId ?? '?'}:${err?.status ?? 'network'}`;
       if (!this.loggedErrors.has(key)) {
@@ -1008,10 +1141,39 @@ export class MapView2D {
   private onSourceData = (e: { sourceId?: string; tile?: unknown }): void => {
     if (!e.sourceId || !e.tile) return;
     const t = this.tileTrouble.get(e.sourceId);
-    if (!t) return;
+    if (!t) {
+      // 公式ハザードマップのタイルを取得できた（取得できなかったタイルが残っていない）
+      if (e.sourceId === IDS.hazard) this.reportHazard(true);
+      return;
+    }
     t.okAt = performance.now();
     this.updateNotice();
   };
+
+  /**
+   * 公式ハザードマップのタイルを取得できたか（ok）・できなかったかをコントローラに知らせる（表示中のときだけ。
+   * 同じ知らせは繰り返さない）。取得できなかった後は、取得できるようになってしばらく失敗しなければ（updateNotice）ok を知らせる。
+   */
+  private reportHazard(ok: boolean): void {
+    const s = this.store.get();
+    // 3D 表示の間は 3D 側が知らせる（この地図の状態は、表示したときに知らせ直す）
+    if (!this.active || !s.layers.officialHazard) return;
+    const next = ok ? 'ok' : 'error';
+    if (s.officialInundation.display === next) return;
+    // 確かめ直している最中（'checking'）に届いた ok は、その結果を待たずに使ってよい（実際にタイルを取得できている）
+    this.actions.reportOfficialHazardDisplay(ok);
+  }
+
+  /** 公式ハザードマップの取得できなかったタイルを読み込み直す */
+  private retryHazardTiles(): void {
+    if (!this.tileTrouble.has(IDS.hazard)) return;
+    const src = this.map?.getSource(IDS.hazard) as Partial<Pick<RasterTileSource, 'setTiles' | 'tiles'>> | undefined;
+    try {
+      if (src?.setTiles && src.tiles) src.setTiles([...src.tiles]);
+    } catch (e) {
+      this.logOnce(`retry:${IDS.hazard}`, e);
+    }
+  }
 
   /** 案内の対象のソースか（背景地図・色別標高・公式ハザードマップ） */
   private noticeSource(sourceId: string): NoticeSource | null {
@@ -1037,6 +1199,8 @@ export class MapView2D {
       const recovered = t.okAt > t.failedAt;
       if (recovered && now - t.failedAt >= TILE_RECOVER_MS) {
         this.tileTrouble.delete(id);
+        // 公式ハザードマップを取得できるようになった
+        if (kind === 'hazard') this.reportHazard(true);
         continue;
       }
       if (recovered) pending = true;
@@ -1084,6 +1248,29 @@ export class MapView2D {
 function outputRevision(output: SimOutput): number | null {
   const r = (output as SimOutput & { revision?: unknown }).revision;
   return typeof r === 'number' && Number.isFinite(r) ? r : null;
+}
+
+/** HUD（左上の列）が広がりうる最大の幅 [px]（CSS の max-width。px で読めなければ 320px） */
+function hudMaxWidth(el: HTMLElement): number {
+  const FALLBACK = 320;
+  try {
+    const mw = getComputedStyle(el).maxWidth;
+    const px = /^(\d+(?:\.\d+)?)px$/.exec(mw);
+    if (px) return Number(px[1]);
+    // min(320px, calc(100% - 24px)) などは最初の px の値
+    const first = /(\d+(?:\.\d+)?)px/.exec(mw);
+    return first ? Math.min(FALLBACK * 1.5, Number(first[1])) : FALLBACK;
+  } catch {
+    return FALLBACK;
+  }
+}
+
+/**
+ * 「計算範囲を表示」の要求か（UI 担当の mapTools.ts は計算範囲の中央 INITIAL_CENTER へ、地図の幅に合わせたズームで
+ * 移動を要求する。地名検索・現在地の要求は名前・現在地の位置を持つ）。
+ */
+function isDomainFocus(f: MapFocus): boolean {
+  return !f.label && Math.abs(f.lon - INITIAL_CENTER.lon) < 1e-9 && Math.abs(f.lat - INITIAL_CENTER.lat) < 1e-9;
 }
 
 function clamp01(v: number): number {

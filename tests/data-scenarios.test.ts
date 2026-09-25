@@ -499,9 +499,14 @@ describe('fact-check: JMA colours and wording', () => {
   it('uses JMA wording verbatim', () => {
     expect(WARNING_INFO.major.damage).toBe('巨大な津波が襲い、木造家屋が全壊・流失し、人は津波による流れに巻き込まれます。');
     expect(WARNING_INFO.warning.heightRange).toBe('予想される津波の最大波の高さが高いところで1mを超え、3m以下の場合');
-    expect(WARNING_INFO.forecast.action).toContain(
-      '津波に伴う海面変動が観測されており、今後も継続する可能性が高いため、海に入っての作業や釣り、海水浴などに際しては十分な留意が必要である旨を発表します。',
-    );
+    // 表「津波予報の発表条件」: 0.2m未満の海面変動の行が本文、注意報解除後の行は別の場合として note に分ける
+    expect(WARNING_INFO.forecast.action).toBe('高いところでも0.2m未満の海面変動のため被害の心配はなく、特段の防災対応の必要がない旨を発表します。');
+    expect(WARNING_INFO.forecast.action).not.toContain('解除後');
+    expect(WARNING_INFO.forecast.note).toEqual({
+      when: '津波注意報解除後も海面変動が継続するとき',
+      text: '津波に伴う海面変動が観測されており、今後も継続する可能性が高いため、海に入っての作業や釣り、海水浴などに際しては十分な留意が必要である旨を発表します。',
+    });
+    for (const lv of ['none', 'advisory', 'warning', 'major'] as const) expect(WARNING_INFO[lv].note, lv).toBeUndefined();
     expect(INTENSITY_INFO['6+'].person).toBe(INTENSITY_INFO['7'].person);
     expect(INTENSITY_INFO['5+'].outdoor).toBe(
       '窓ガラスが割れて落ちることがある。補強されていないブロック塀が崩れることがある。据付けが不十分な自動販売機が倒れることがある。自動車の運転が困難となり、停止する車もある。',

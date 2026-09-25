@@ -10,9 +10,18 @@
  *   親をズーム12にすると z17 で1枚見落とすため、ズーム13を使う。
  *
  * 2D 地図では MapLibre の addProtocol で独自のスキーム（kgz-hazard://z/x/y）を登録して使う。
+ *
+ * 取得には時間の上限を設ける（配信元が応答しないまま待ち続けると、タイルが「読み込み中」のまま止まり、
+ * 取得できないことを画面に示せないため）。時間切れは取得の失敗として扱い、親タイルの判定の記録は残さない（次回また試す）。
  */
 import { addProtocol } from 'maplibre-gl';
 import { HAZARD_TSUNAMI_TILES } from '../data/sources';
+import { withTimeout } from '../ui/geoSearch';
+
+/** 親タイル（存在の判定）1 枚の取得の時間の上限 [ms] */
+export const PRESENCE_TIMEOUT_MS = 10_000;
+/** 表示するタイル 1 枚の取得の時間の上限 [ms] */
+export const HAZARD_TILE_TIMEOUT_MS = 15_000;
 
 export const HAZARD_PROTOCOL = 'kgz-hazard';
 export const HAZARD_PROTOCOL_URL = `${HAZARD_PROTOCOL}://{z}/{x}/{y}`;
@@ -57,12 +66,15 @@ function loadPresence(x: number, y: number): Promise<Presence> {
   const key = `${x}/${y}`;
   let p = presence.get(key);
   if (!p) {
-    p = fetch(hazardTileUrl(PRESENCE_ZOOM, x, y), { mode: 'cors', credentials: 'omit' })
-      .then(async (res): Promise<Presence> => {
+    p = withTimeout(
+      async (signal): Promise<Presence> => {
+        const res = await fetch(hazardTileUrl(PRESENCE_ZOOM, x, y), { signal, mode: 'cors', credentials: 'omit' });
         if (res.status === 404) return null;
         if (!res.ok) return undefined;
         return decodeAlpha(await res.blob());
-      })
+      },
+      { timeoutMs: PRESENCE_TIMEOUT_MS },
+    )
       .catch((): Presence => {
         // 通信の失敗では判定しない（次回また試せるよう記録を消す）
         presence.delete(key);
@@ -110,10 +122,16 @@ export function registerHazardProtocol(): void {
     if (!m) throw new Error(`不正なタイルの URL: ${params.url}`);
     const [z, x, y] = [Number(m[1]), Number(m[2]), Number(m[3])];
     if (!(await hazardTileMayExist(z, x, y))) return { data: emptyTile() };
-    const res = await fetch(hazardTileUrl(z, x, y), { signal: abortController.signal, mode: 'cors', credentials: 'omit' });
-    // 浸水想定の無いタイルは 404（通常の応答）
-    if (res.status === 404) return { data: emptyTile() };
-    if (!res.ok) throw new Error(`タイルを取得できませんでした（HTTP ${res.status}）`);
-    return { data: await res.arrayBuffer() };
+    const data = await withTimeout(
+      async (signal) => {
+        const res = await fetch(hazardTileUrl(z, x, y), { signal, mode: 'cors', credentials: 'omit' });
+        // 浸水想定の無いタイルは 404（通常の応答）
+        if (res.status === 404) return emptyTile();
+        if (!res.ok) throw new Error(`タイルを取得できませんでした（HTTP ${res.status}）`);
+        return res.arrayBuffer();
+      },
+      { signal: abortController.signal, timeoutMs: HAZARD_TILE_TIMEOUT_MS },
+    );
+    return { data };
   });
 }

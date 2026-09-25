@@ -93,6 +93,14 @@ const CSS = `
 .m2d-popup .m2d-pk { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 999px; color: #fff; margin-bottom: 3px; }
 .m2d-popup p { margin: 2px 0 0; }
 .m2d-popup .m2d-src { color: #64748b; font-size: 10.5px; margin-top: 4px; }
+/* 避難場所データの利用上の注意（指定緊急避難場所データ）。長いので小さめの文字で、ポップアップが画面を覆わない高さまで */
+.m2d-popup .m2d-shelter-note {
+  margin-top: 6px; padding-top: 5px; border-top: 1px solid #e2e8f0; color: #475569; font-size: 10.5px; line-height: 1.5;
+  max-height: min(40vh, 220px); overflow-y: auto; overscroll-behavior: contain;
+}
+.m2d-popup .m2d-shelter-note p { margin: 0 0 3px; }
+.m2d-popup .m2d-shelter-note a { color: #0369a1; text-decoration: underline; }
+.m2d-popup .m2d-shelter-note a:focus-visible { outline: 2px solid #0ea5e9; outline-offset: 1px; }
 
 /* 人物 */
 .m2d-person { width: 34px; height: 34px; cursor: pointer; }
@@ -125,6 +133,16 @@ const CSS = `
 }
 .m2d-person--critical .m2d-person__disc::after { animation-duration: .8s; }
 @keyframes m2d-pulse { from { transform: scale(1); opacity: .9; } to { transform: scale(1.9); opacity: 0; } }
+/* 選択中の人物の避難先（旗と短い名前。全文は title） */
+.m2d-target-label {
+  display: flex; align-items: center; gap: 2px; max-width: 240px; font-size: 11px; font-weight: 700; line-height: 1.35;
+  color: #0f172a; background: rgba(255,255,255,.94); border-radius: 4px; padding: 1px 6px 1px 3px;
+  box-shadow: 0 0 0 1.5px var(--m2d-target, #2563eb); cursor: help;
+}
+.m2d-target-label__flag { flex: none; display: inline-block; width: 14px; height: 14px; color: var(--m2d-target, #2563eb); }
+.m2d-target-label__flag svg { display: block; width: 14px; height: 14px; }
+.m2d-target-label__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* 地名検索で選んだ場所の目印 */
 .m2d-search { display: flex; flex-direction: column; align-items: center; pointer-events: none; }
 .m2d-search__label {
@@ -161,10 +179,10 @@ const CSS = `
 @media (max-width: 819.98px), (pointer: coarse) {
   .m2d-root .maplibregl-ctrl-top-right .maplibregl-ctrl { margin: 8px 8px 0 0; }
   .m2d-root .maplibregl-ctrl-group button { width: 40px; height: var(--m2d-zoom-h, 29px); }
-  /* 出典の開閉ボタン（右下）。上端は、下中央の状態表示（HUD、下から 34px）より下に収める */
-  .m2d-root .maplibregl-ctrl-bottom-right > .maplibregl-ctrl-attrib.maplibregl-compact { margin: 0 6px 2px 0; min-height: 28px; padding-right: 32px; border-radius: 16px; }
-  .m2d-root .maplibregl-ctrl-bottom-right > .maplibregl-ctrl-attrib.maplibregl-compact-show { padding-right: 36px; }
-  .m2d-root .maplibregl-ctrl-attrib-button { width: 32px; height: 32px; border-radius: 16px; background-position: center; background-repeat: no-repeat; }
+  /* 出典の開閉ボタン（右下）: 40×40。右下の角に寄せて、下中央の状態表示（HUD）とできるだけ重ならないように */
+  .m2d-root .maplibregl-ctrl-bottom-right > .maplibregl-ctrl-attrib.maplibregl-compact { margin: 0 4px 0 0; min-height: 36px; padding-right: 40px; border-radius: 20px; }
+  .m2d-root .maplibregl-ctrl-bottom-right > .maplibregl-ctrl-attrib.maplibregl-compact-show { padding: 4px 44px 4px 10px; min-height: 32px; }
+  .m2d-root .maplibregl-ctrl-attrib-button { width: 40px; height: 40px; border-radius: 20px; background-position: center; background-repeat: no-repeat; }
   .m2d-shelter { width: 40px; height: 40px; display: grid; place-items: center; }
   .m2d-person::before { content: ""; position: absolute; inset: -4px; border-radius: 50%; }
   .m2d-hint__done { min-height: 40px; padding: 8px 14px; }

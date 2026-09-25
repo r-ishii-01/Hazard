@@ -31,3 +31,10 @@ export const DISAPORTAL_URL = 'https://disaportal.gsi.go.jp/';
 
 /** 国土地理院 指定緊急避難場所データ */
 export const GSI_SHELTER_DATA_URL = 'https://www.gsi.go.jp/bousaichiri/hinanbasho.html';
+
+/**
+ * サイトに含まれるライブラリ（MapLibre GL JS・three.js など）の著作権表示とライセンス条文。
+ * public/THIRD_PARTY_LICENSES.txt が dist/ にそのままコピーされる（vite.config.ts の THIRD_PARTY_NOTICES_FILE）。
+ * サブパスに置いても読めるよう、ページからの相対 URL にする（vite.config.ts の base: './' と同じ考え方）。
+ */
+export const THIRD_PARTY_LICENSES_URL = './THIRD_PARTY_LICENSES.txt';

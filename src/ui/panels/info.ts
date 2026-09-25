@@ -12,7 +12,15 @@ import { CSIS_CREDIT, CSIS_URL, GSI_API_NOTICE, GSI_MAPS_API_NOTE_URL, GSI_REVER
 import { GEO_PRIVACY_TEXT, GEO_TILE_NOTE } from '../geolocate';
 import { arrivalLegend, depthLegend } from '../legends';
 import { sheltersInfoLine } from '../shelterInfo';
-import { DISAPORTAL_URL, FUJISAWA_TSUNAMI_HAZARDMAP_URL, GSI_DEM_TILE_URL, JMA_SHINDO_TABLE_URL, JMA_TSUNAMI_WARNING_URL, KANAGAWA_TSUNAMI_SHINSUI_URL } from '../links';
+import {
+  DISAPORTAL_URL,
+  FUJISAWA_TSUNAMI_HAZARDMAP_URL,
+  GSI_DEM_TILE_URL,
+  JMA_SHINDO_TABLE_URL,
+  JMA_TSUNAMI_WARNING_URL,
+  KANAGAWA_TSUNAMI_SHINSUI_URL,
+  THIRD_PARTY_LICENSES_URL,
+} from '../links';
 
 export function createInfoPanel(ctx: UIContext): HTMLElement {
   // シナリオの出典（重複を除く）
@@ -93,7 +101,7 @@ export function createInfoPanel(ctx: UIContext): HTMLElement {
     h(
       'section',
       { class: 'section' },
-      h('h2', { class: 'section-title' }, icon('info', 18), '出典・データ'),
+      h('h2', { class: 'section-title' }, icon('info', 18), '出典・データ・ライセンス'),
       h(
         'ul',
         { class: 'source-list' },
@@ -119,6 +127,13 @@ export function createInfoPanel(ctx: UIContext): HTMLElement {
         h('li', null, '津波警報・注意報: ', extLink(JMA_TSUNAMI_WARNING_URL, '気象庁「津波警報・注意報、津波情報、津波予報について」')),
         h('li', null, extLink(FUJISAWA_TSUNAMI_HAZARDMAP_URL, '藤沢市「津波ハザードマップ」')),
         scenarioSources,
+      ),
+      h('h3', { class: 'group-title' }, 'ライブラリのライセンス'),
+      h(
+        'p',
+        { class: 'source-note source-licenses' },
+        'このサイトのプログラムに含まれるライブラリ（MapLibre GL JS・three.js など）の著作権表示とライセンス条文: ',
+        extLink(THIRD_PARTY_LICENSES_URL, 'THIRD_PARTY_LICENSES.txt'),
       ),
     ),
   );

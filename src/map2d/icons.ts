@@ -70,6 +70,17 @@ export function statusBadgeSvg(status: PersonStatus): string {
   return svg('0 0 16 16', `<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">${STATUS_BADGE[status]}</g>`);
 }
 
+/**
+ * 「その場にとどまる」人（浸水していない間）のバッジ: 位置のピン。
+ * 状態は 'waiting' だが、「避難開始前」の時計にすると、これから避難を始めるように読めるため（「人物」タブの一覧と同じ印）。
+ */
+export function stayBadgeSvg(): string {
+  return svg(
+    '0 0 16 16',
+    '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"><path d="M8 14s-4.2-3.9-4.2-7.2a4.2 4.2 0 0 1 8.4 0C12.2 10.1 8 14 8 14z"/><circle cx="8" cy="6.8" r="1.4"/></g>',
+  );
+}
+
 /** 状態の並び（凡例と同じ順） */
 const STATUS_KEYS: PersonStatus[] = ['waiting', 'evacuating', 'safe', 'caution', 'danger', 'critical'];
 

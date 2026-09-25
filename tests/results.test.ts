@@ -319,9 +319,11 @@ describe('表示の書式・文言', () => {
     expect(t.action).toContain('被害の心配はなく');
     expect(t.action).not.toContain('津波注意報解除後');
     expect(t.action).not.toContain('旨を発表します');
-    if (WARNING_INFO.forecast.action.startsWith('（津波注意報解除後')) {
-      expect(t.reference).toMatch(/^参考: 津波注意報の解除後も海面変動が続くときの津波予報では、/);
-    }
+    expect(t.action).toBe('高いところでも0.2m未満の海面変動のため被害の心配はなく、特段の防災対応の必要がないとされています（気象庁の津波予報）。');
+    // 注意報解除後の場合（data の note）は詳細の参考として分ける
+    expect(t.reference).toBe(
+      '参考: 「津波注意報解除後も海面変動が継続するとき」の津波予報では、津波に伴う海面変動が観測されており、今後も継続する可能性が高いため、海に入っての作業や釣り、海水浴などに際しては十分な留意が必要である旨を発表します（気象庁）。',
+    );
     // 他の区分は「とるべき行動」をそのまま
     expect(warningCardText('major', WARNING_INFO.major).action).toBe(WARNING_INFO.major.action);
     expect(warningCardText('advisory', WARNING_INFO.advisory).reference).toBe('');

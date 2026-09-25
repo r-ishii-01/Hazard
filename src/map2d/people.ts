@@ -9,8 +9,9 @@ import type { AppActions } from '../core/controller';
 import type { EvacPlan, Person, PersonState, PersonStatus, SimOutput, TerrainGrid } from '../core/types';
 import { formatDepth } from '../core/format';
 import { PERSON_PROFILES, personStateAt, personStatusLabel } from '../people';
-import { FLAG_SVG, STATUS_STYLE, personIconSvg, statusBadgeSvg } from './icons';
+import { FLAG_SVG, STATUS_STYLE, personIconSvg, stayBadgeSvg, statusBadgeSvg } from './icons';
 import { IDS, emptyFC, type GeoFeature, type GeoFeatureCollection } from './style';
+import { shortTargetName } from './targetName';
 
 interface PersonView {
   id: string;
@@ -24,6 +25,8 @@ interface PersonView {
   kind: Person['kind'] | '';
   name: string;
   status: PersonStatus | '';
+  /** バッジの形（状態。「その場にとどまる」人の 'waiting' は 'stay'） */
+  badgeKind: PersonStatus | 'stay' | '';
   depthText: string;
   title: string;
   selected: boolean;
@@ -157,6 +160,7 @@ export class PeopleLayer {
       kind: '',
       name: '',
       status: '',
+      badgeKind: '',
       depthText: '',
       title: '',
       selected: false,
@@ -204,7 +208,14 @@ export class PeopleLayer {
       v.el.style.setProperty('--m2d-ring', STATUS_STYLE[status].color);
       // 状態の色の上のバッジ・浸水深の札の文字色（明るい色の上では濃い色）
       v.el.style.setProperty('--m2d-ink', STATUS_STYLE[status].ink);
-      v.badge.innerHTML = statusBadgeSvg(status);
+    }
+    // 「その場にとどまる」人で浸水していない間は、「避難開始前」の時計でなく、とどまっていることを示す印
+    // （「人物」タブの一覧・凡例と同じ。表示名は personStatusLabel の「とどまっている」）
+    const badge: PersonStatus | 'stay' = status === 'waiting' && p.evacMode === 'stay' ? 'stay' : status;
+    if (v.badgeKind !== badge) {
+      v.badgeKind = badge;
+      v.badge.innerHTML = badge === 'stay' ? stayBadgeSvg() : statusBadgeSvg(badge);
+      v.el.classList.toggle('m2d-person--stay', badge === 'stay');
     }
     const depthText = st.depth >= 0.01 ? formatDepth(st.depth) : '';
     if (v.depthText !== depthText) {
@@ -286,7 +297,10 @@ export class PeopleLayer {
     this.updateTargetLabel(selTarget);
   }
 
-  /** 選択中の人物の避難先に小さな旗と名前を出す */
+  /**
+   * 選択中の人物の避難先に小さな旗と名前を出す。
+   * 避難先の名前は選んだ根拠を含む長い文なので、札には短い形（種類・標高・注意）を出し、全文は title（ツールチップ）に出す。
+   */
   private updateTargetLabel(t: { lon: number; lat: number; name: string; color: string } | null): void {
     const key = t ? `${t.lon},${t.lat},${t.name},${t.color}` : '';
     if (key === this.targetLabelKey) return;
@@ -296,16 +310,16 @@ export class PeopleLayer {
     if (!t) return;
     const el = document.createElement('div');
     el.className = 'm2d-target-label';
-    el.style.cssText =
-      'pointer-events:none;display:flex;align-items:center;gap:2px;font-size:11px;font-weight:700;white-space:nowrap;' +
-      'color:#0f172a;background:rgba(255,255,255,.94);border-radius:4px;padding:1px 6px 1px 3px;box-shadow:0 0 0 1.5px ' +
-      t.color +
-      ';';
+    const full = `避難先: ${t.name}`;
+    el.title = full;
+    el.setAttribute('aria-label', full);
+    el.style.setProperty('--m2d-target', t.color);
     const flag = document.createElement('span');
-    flag.style.cssText = `display:inline-block;width:14px;height:14px;color:${t.color}`;
+    flag.className = 'm2d-target-label__flag';
     flag.innerHTML = FLAG_SVG;
     const txt = document.createElement('span');
-    txt.textContent = `避難先: ${t.name}`;
+    txt.className = 'm2d-target-label__text';
+    txt.textContent = `避難先: ${shortTargetName(t.name)}`;
     el.append(flag, txt);
     // 到着した人物のマーカー（半径 約20px）と重ならないよう上にずらす
     this.targetLabel = new Marker({ element: el, anchor: 'bottom', offset: [0, -24] }).setLngLat([t.lon, t.lat]).addTo(this.map);
@@ -322,8 +336,8 @@ export class PeopleLayer {
 
   /**
    * 前の計算結果への参照を手放す（新しい計算が始まった・地形を読み込み直したとき）。
-   * 直近の状態（ドラッグの終わりの処理用）の計算結果と避難計画も手放す: 計画は、計算結果を参照する
-   * 状態判定のキャッシュ（people）のキーなので、古い計画を持ち続けると古い計算結果もメモリに残る。
+   * 直近の状態（ドラッグの終わりの処理用）の計算結果と避難計画も手放す（古い計画は使わない。
+   * 状態判定のキャッシュ〔people/state.ts〕は計算結果をキーにしているので、計画から古い計算結果が残ることはない）。
    * 地図を表示していれば、すぐ次の update で今の状態に置き換わる。
    */
   dropOutput(current: SimOutput | null): void {
